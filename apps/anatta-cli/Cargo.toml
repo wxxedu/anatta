@@ -14,12 +14,13 @@ path = "src/main.rs"
 
 [dependencies]
 anatta-core    = { path = "../../crates/anatta-core" }
-anatta-runtime = { path = "../../crates/anatta-runtime" }
+anatta-runtime = { path = "../../crates/anatta-runtime", features = ["spawn"] }
 anatta-store   = { path = "../../crates/anatta-store" }
 
 clap        = { version = "4", features = ["derive", "env"] }
 dialoguer   = { version = "0.11", default-features = false, features = ["password"] }
 keyring     = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
 tokio       = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-std"] }
+serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 chrono      = { workspace = true }

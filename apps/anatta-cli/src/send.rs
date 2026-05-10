@@ -1,21 +1,297 @@
-//! `anatta send` — placeholder stub (not yet implemented).
+//! `anatta send` — one-shot prompt through a configured profile.
+//!
+//! Resolves the profile's provider + per-row overrides into a flat
+//! `(name, value)` env list via [`anatta_runtime::profile::ProviderEnv`]
+//! (api-key path) or skips env injection entirely (login path; claude-cli
+//! reads its own keychain), spawns the backend with that env, streams
+//! `AgentEvent`s to stdout/stderr, then bumps `last_used_at`.
 
+use std::path::PathBuf;
+
+use anatta_core::{AgentEvent, AgentEventPayload};
+use anatta_runtime::profile::{
+    providers, ClaudeProfile, ClaudeProfileId, CodexProfile, CodexProfileId, Overrides,
+    ProviderEnv,
+};
+use anatta_runtime::spawn::{
+    self, AgentSession, ClaudeLaunch, ClaudeSessionId, CodexLaunch, CodexThreadId, ExitInfo,
+};
+use anatta_store::profile::{AuthMethod, BackendKind, ProfileRecord};
 use clap::Args;
 
+use crate::auth;
 use crate::config::Config;
 
 #[derive(Args, Debug)]
 pub struct SendArgs {
-    /// The prompt text to send.
+    /// Profile id (e.g. `claude-Ab12CdEf` or `codex-…`).
+    profile: String,
+    /// Prompt text.
     prompt: String,
+    /// Working directory the agent runs in. Defaults to the current dir.
+    #[arg(long)]
+    cwd: Option<PathBuf>,
+    /// Resume an existing session/thread (claude session UUID / codex
+    /// thread UUID) instead of starting fresh.
+    #[arg(long)]
+    resume: Option<String>,
+    /// Emit each `AgentEvent` as one JSON line on stdout instead of a
+    /// pretty-printed transcript.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
-    #[error("send is not yet implemented")]
-    NotImplemented,
+    #[error("profile not found: {0}")]
+    ProfileNotFound(String),
+    #[error("backend binary `{0}` not found on PATH")]
+    BinaryNotFound(&'static str),
+    #[error("api key for profile {0} is missing from the OS keyring")]
+    ApiKeyMissing(String),
+    #[error(
+        "provider `{0}` recorded on this profile is not in the runtime registry; \
+         the binary may be older than the profile"
+    )]
+    UnknownProvider(String),
+    #[error(
+        "backend `{backend}` exited with code={code:?} signal={signal:?}; \
+         stderr tail: {stderr_tail}"
+    )]
+    BackendNonZero {
+        backend: &'static str,
+        code: Option<i32>,
+        signal: Option<i32>,
+        stderr_tail: String,
+    },
+
+    #[error("auth: {0}")]
+    Auth(#[from] auth::AuthError),
+    #[error("profile: {0}")]
+    Profile(#[from] anatta_runtime::profile::ProfileError),
+    #[error("store: {0}")]
+    Store(#[from] anatta_store::StoreError),
+    #[error("spawn: {0}")]
+    Spawn(#[from] spawn::SpawnError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("serialize event: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
-pub async fn run(_args: SendArgs, _cfg: &Config) -> Result<(), SendError> {
-    Err(SendError::NotImplemented)
+pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
+    let record = cfg
+        .store
+        .get_profile(&args.profile)
+        .await?
+        .ok_or_else(|| SendError::ProfileNotFound(args.profile.clone()))?;
+
+    let cwd = match args.cwd {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+
+    match record.backend {
+        BackendKind::Claude => {
+            run_claude(args.prompt, args.resume, args.json, cwd, record, cfg).await
+        }
+        BackendKind::Codex => {
+            run_codex(args.prompt, args.resume, args.json, cwd, record, cfg).await
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Claude
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn run_claude(
+    prompt: String,
+    resume: Option<String>,
+    json: bool,
+    cwd: PathBuf,
+    record: ProfileRecord,
+    cfg: &Config,
+) -> Result<(), SendError> {
+    let id = ClaudeProfileId::from_string(record.id.clone())?;
+    let profile = ClaudeProfile::open(id, &cfg.anatta_home)?;
+    let binary_path = auth::locate_binary("claude").ok_or(SendError::BinaryNotFound("claude"))?;
+
+    // OAuth/login path: provider = None so claude-cli reads its keychain
+    // off CLAUDE_CONFIG_DIR. API-key path: build a flat ProviderEnv that
+    // includes ANTHROPIC_AUTH_TOKEN, the spec's defaults overlaid with the
+    // profile's per-row overrides, plus any vendor-specific extra_env.
+    let provider = match record.auth_method {
+        AuthMethod::Login => None,
+        AuthMethod::ApiKey => {
+            let spec = providers::lookup(&record.provider)
+                .ok_or_else(|| SendError::UnknownProvider(record.provider.clone()))?;
+            let token = auth::read_api_key(&record.id)?
+                .ok_or_else(|| SendError::ApiKeyMissing(record.id.clone()))?;
+            let overrides = Overrides {
+                base_url: record.base_url_override.clone(),
+                model: record.model_override.clone(),
+                small_fast_model: record.small_fast_model_override.clone(),
+                default_opus_model: record.default_opus_model_override.clone(),
+                default_sonnet_model: record.default_sonnet_model_override.clone(),
+                default_haiku_model: record.default_haiku_model_override.clone(),
+                subagent_model: record.subagent_model_override.clone(),
+            };
+            Some(ProviderEnv::build(spec, &overrides, token))
+        }
+    };
+
+    let launch = ClaudeLaunch {
+        profile,
+        cwd,
+        prompt,
+        resume: resume.map(ClaudeSessionId::new),
+        binary_path,
+        provider,
+    };
+
+    let session = spawn::launch(launch).await?;
+    let exit = stream_session(session, json).await?;
+    cfg.store.touch_profile(&record.id).await?;
+    enforce_exit("claude", exit)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Codex
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn run_codex(
+    prompt: String,
+    resume: Option<String>,
+    json: bool,
+    cwd: PathBuf,
+    record: ProfileRecord,
+    cfg: &Config,
+) -> Result<(), SendError> {
+    let id = CodexProfileId::from_string(record.id.clone())?;
+    let profile = CodexProfile::open(id, &cfg.anatta_home)?;
+    let binary_path = auth::locate_binary("codex").ok_or(SendError::BinaryNotFound("codex"))?;
+
+    // Codex has only the `openai` provider in v1 and no env overrides;
+    // model overrides on the profile row are accepted by the CLI but
+    // not yet wired here (codex-cli has no equivalent env namespace).
+    let api_key = match record.auth_method {
+        AuthMethod::Login => None,
+        AuthMethod::ApiKey => Some(
+            auth::read_api_key(&record.id)?
+                .ok_or_else(|| SendError::ApiKeyMissing(record.id.clone()))?,
+        ),
+    };
+
+    let launch = CodexLaunch {
+        profile,
+        cwd,
+        prompt,
+        resume: resume.map(CodexThreadId::new),
+        binary_path,
+        api_key,
+    };
+
+    let session = spawn::launch(launch).await?;
+    let exit = stream_session(session, json).await?;
+    cfg.store.touch_profile(&record.id).await?;
+    enforce_exit("codex", exit)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Streaming
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn stream_session(mut session: AgentSession, json: bool) -> Result<ExitInfo, SendError> {
+    eprintln!("[anatta] session: {}", session.session_id());
+    while let Some(ev) = session.events().recv().await {
+        if json {
+            println!("{}", serde_json::to_string(&ev)?);
+        } else {
+            render_pretty(&ev);
+        }
+    }
+    let exit = session.wait().await?;
+    eprintln!(
+        "[anatta] exit: code={:?} signal={:?} duration={:?} events={}",
+        exit.exit_code, exit.signal, exit.duration, exit.events_emitted,
+    );
+    Ok(exit)
+}
+
+fn render_pretty(ev: &AgentEvent) {
+    use AgentEventPayload::*;
+    match &ev.payload {
+        SessionStarted { model, cwd, .. } => {
+            eprintln!("[anatta] model={model} cwd={cwd}");
+        }
+        AssistantText { text } => {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+        }
+        Thinking { text } => {
+            for line in text.lines() {
+                eprintln!("  · {line}");
+            }
+        }
+        ToolUse { name, input, .. } => {
+            let summary = serde_json::to_string(input).unwrap_or_default();
+            eprintln!("[tool] {name} {}", truncate(&summary, 140));
+        }
+        ToolResult { success, text, .. } => {
+            let tag = if *success { "ok" } else { "err" };
+            let body = text.as_deref().unwrap_or("");
+            eprintln!("[tool/{tag}] {}", truncate(body, 200));
+        }
+        Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            ..
+        } => match cost_usd {
+            Some(c) => eprintln!("[usage] in={input_tokens} out={output_tokens} cost=${c:.4}"),
+            None => eprintln!("[usage] in={input_tokens} out={output_tokens}"),
+        },
+        TurnCompleted {
+            stop_reason,
+            is_error,
+        } => {
+            let err = if *is_error { " (error)" } else { "" };
+            match stop_reason {
+                Some(r) => eprintln!("[turn] done ({r}){err}"),
+                None => eprintln!("[turn] done{err}"),
+            }
+        }
+        RateLimit { limit_kind, .. } => eprintln!("[rate-limit] {limit_kind}"),
+        Error { message, fatal } => {
+            eprintln!("[error{}] {message}", if *fatal { " fatal" } else { "" });
+        }
+        TurnStarted | UserPrompt { .. } => {}
+        // Snapshots — the finalized variants carry the same content. Skip.
+        AssistantTextDelta { .. } | ThinkingDelta { .. } | ToolUseInputDelta { .. } => {}
+    }
+}
+
+fn truncate(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max_chars {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        std::borrow::Cow::Owned(format!("{truncated}…"))
+    }
+}
+
+fn enforce_exit(backend: &'static str, exit: ExitInfo) -> Result<(), SendError> {
+    if exit.exit_code == Some(0) {
+        Ok(())
+    } else {
+        Err(SendError::BackendNonZero {
+            backend,
+            code: exit.exit_code,
+            signal: exit.signal,
+            stderr_tail: exit.stderr_tail,
+        })
+    }
 }
