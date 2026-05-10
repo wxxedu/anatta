@@ -1,0 +1,9 @@
+# Workspace-level config.
+#
+# SQLX_OFFLINE=true makes sqlx::query! / query_as! macros consult the
+# committed `.sqlx/` cache (next to crates/anatta-store/) rather than
+# trying to connect to a live DB at compile time. Contributors who
+# change SQL must regenerate the cache via `scripts/sqlx-prepare.sh`
+# (requires sqlx-cli installed once via `cargo install sqlx-cli`).
+[env]
+SQLX_OFFLINE = "true"

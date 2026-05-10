@@ -1,0 +1,11 @@
+[package]
+name = "anatta-daemon-core"
+description = "Daemon-side library: intent FSM driver, server bidi loop, scheduler. Consumed by apps/anatta-daemon."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]

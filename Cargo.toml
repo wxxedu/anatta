@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/anatta-core",
+    "crates/anatta-store",
+    "crates/anatta-worktree",
+    "crates/anatta-runtime",
+    "crates/anatta-server-core",
+    "crates/anatta-daemon-core",
+    "apps/anatta-server",
+    "apps/anatta-daemon",
+    "apps/anatta-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/wxxedu/anatta"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+# Serialization
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Time
+chrono     = { version = "0.4", default-features = false, features = ["serde", "std", "clock"] }
+
+# Errors
+thiserror  = "2"

@@ -1,0 +1,16 @@
+[package]
+name = "anatta-server"
+description = "anatta server binary: parses config, starts the gRPC service from anatta-server-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "anatta-server"
+path = "src/main.rs"
+
+[dependencies]
+anatta-server-core = { path = "../../crates/anatta-server-core" }

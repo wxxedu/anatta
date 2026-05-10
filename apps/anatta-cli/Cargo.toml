@@ -1,0 +1,25 @@
+[package]
+name = "anatta-cli"
+description = "anatta command-line client. v1: profile management. Phase 2: talks to anatta-server over HTTP+SSE."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "anatta"
+path = "src/main.rs"
+
+[dependencies]
+anatta-core    = { path = "../../crates/anatta-core" }
+anatta-runtime = { path = "../../crates/anatta-runtime" }
+anatta-store   = { path = "../../crates/anatta-store" }
+
+clap        = { version = "4", features = ["derive", "env"] }
+dialoguer   = { version = "0.11", default-features = false, features = ["password"] }
+keyring     = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-std"] }
+thiserror   = { workspace = true }
+chrono      = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "anatta-daemon"
+description = "anatta daemon binary: parses config, runs the daemon from anatta-daemon-core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "anatta-daemon"
+path = "src/main.rs"
+
+[dependencies]
+anatta-daemon-core = { path = "../../crates/anatta-daemon-core" }
