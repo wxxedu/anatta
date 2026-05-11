@@ -29,7 +29,7 @@ pub(crate) mod pipeline;
 mod stderr_buf;
 
 pub use claude::ClaudeLaunch;
-pub use codex::CodexLaunch;
+pub use codex::{CodexLaunch, PersistentCodexSession, TurnHandle};
 pub use ids::{ClaudeSessionId, CodexThreadId};
 
 use std::path::PathBuf;

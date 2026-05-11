@@ -14,7 +14,6 @@ use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
 
 use anatta_core::{AgentEvent, AgentEventPayload};
-use anatta_runtime::spawn::ExitInfo;
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use crossterm::{cursor, queue, terminal};
 use serde_json::Value;
@@ -407,7 +406,7 @@ impl EventRenderer for LineRenderer {
         }
     }
 
-    fn on_turn_end(&mut self, _exit: &ExitInfo) {
+    fn on_turn_end(&mut self) {
         self.commit_delta();
     }
 

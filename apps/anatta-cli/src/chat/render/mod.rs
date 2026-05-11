@@ -7,7 +7,6 @@
 //! markdown engines doesn't ripple into [`line`].
 
 use anatta_core::AgentEvent;
-use anatta_runtime::spawn::ExitInfo;
 use crossterm::style::Color;
 
 pub(crate) mod line;
@@ -18,8 +17,11 @@ pub(crate) mod markdown;
 pub(crate) trait EventRenderer {
     fn on_event(&mut self, ev: &AgentEvent);
 
-    /// Called after the backend child exits for one turn.
-    fn on_turn_end(&mut self, exit: &ExitInfo);
+    /// Called after one turn ends (the child exited for one-shot
+    /// backends like claude, or `turn/completed` fired for persistent
+    /// backends like codex). Renderers use this to commit pending
+    /// delta state.
+    fn on_turn_end(&mut self);
 
     /// Called once before the chat loop returns. Last chance to flush
     /// state, render a goodbye line, etc.

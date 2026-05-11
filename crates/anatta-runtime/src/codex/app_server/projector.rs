@@ -59,6 +59,10 @@ impl AppServerProjector {
         }
     }
 
+    pub(crate) fn session_id(&self) -> &str {
+        &self.thread_id
+    }
+
     /// Dispatch one notification. Returns the AgentEvents to forward.
     pub(crate) fn project(&mut self, method: &str, params: &Value) -> Vec<AgentEvent> {
         let now = Utc::now();
