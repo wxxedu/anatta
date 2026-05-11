@@ -802,3 +802,10 @@ None blocking implementation. Known residuals:
   `SessionStarted` (and possibly partial UserPrompt) events. Resume from
   this state works (claude/codex accept short histories) but produces a
   visually empty first turn on replay. Documented behavior, not a bug.
+- Non-TTY mode relies on final `ToolUse` events to print the tool line.
+  If a turn is aborted before claude's consolidated `assistant`
+  message_stop fires (rare — error / network drop / SIGKILL on the child
+  before message_stop), tool blocks that only emitted
+  `ToolUseInputDelta` will not appear in the non-TTY log. TTY mode still
+  shows the `⚙ …` placeholder. This is acceptable for v1; pipe consumers
+  see what claude actually finalized.
