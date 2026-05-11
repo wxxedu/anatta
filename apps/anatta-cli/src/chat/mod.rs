@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use anatta_runtime::SessionLock;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
+use dialoguer::theme::ColorfulTheme;
 
 use crate::config::Config;
 
@@ -26,8 +27,11 @@ mod runner;
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
+    /// With no subcommand, `anatta chat` opens an interactive picker
+    /// (resume an existing conversation or start a new one). For
+    /// scripting, use the explicit subcommands.
     #[command(subcommand)]
-    pub action: ChatCommand,
+    pub action: Option<ChatCommand>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -85,6 +89,10 @@ pub enum ChatError {
     Io(#[from] std::io::Error),
     #[error("readline: {0}")]
     Readline(String),
+    #[error("interactive prompt: {0}")]
+    Prompt(#[from] dialoguer::Error),
+    #[error("no profiles configured — run `anatta profile create` first")]
+    NoProfiles,
 }
 
 impl ChatError {
@@ -108,15 +116,109 @@ impl ChatError {
 
 pub async fn run(args: ChatArgs, cfg: &Config) -> Result<(), ChatError> {
     match args.action {
-        ChatCommand::New {
+        None => run_interactive(cfg).await,
+        Some(ChatCommand::New {
             name,
             profile,
             cwd,
-        } => runner::run_new(name, profile, cwd, cfg).await,
-        ChatCommand::Resume { name } => runner::run_resume(name, cfg).await,
-        ChatCommand::Ls => run_ls(cfg).await,
-        ChatCommand::Rm { name } => run_rm(name, cfg).await,
+        }) => runner::run_new(name, profile, cwd, cfg).await,
+        Some(ChatCommand::Resume { name }) => runner::run_resume(name, cfg).await,
+        Some(ChatCommand::Ls) => run_ls(cfg).await,
+        Some(ChatCommand::Rm { name }) => run_rm(name, cfg).await,
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// interactive picker (`anatta chat` with no subcommand)
+// ──────────────────────────────────────────────────────────────────────
+
+async fn run_interactive(cfg: &Config) -> Result<(), ChatError> {
+    let convs = cfg.store.list_conversations().await?;
+    let now = Utc::now();
+    let theme = ColorfulTheme::default();
+
+    // Build the menu. Each existing conversation gets a "Resume:" entry;
+    // a "[+] New conversation" entry is always last.
+    let mut labels: Vec<String> = convs
+        .iter()
+        .map(|c| {
+            let status = if SessionLock::is_held(&cfg.anatta_home, &c.name) {
+                "🔒 "
+            } else {
+                ""
+            };
+            format!(
+                "{status}{name}  ·  {profile}  ·  {ago}",
+                name = c.name,
+                profile = c.profile_id,
+                ago = humanize_ago(now, c.last_used_at),
+            )
+        })
+        .collect();
+    labels.push("[+] New conversation".to_owned());
+
+    let prompt = if convs.is_empty() {
+        "anatta chat (no conversations yet)"
+    } else {
+        "anatta chat"
+    };
+
+    // `interact_opt` returns None on Ctrl-C / Esc, which we treat as
+    // a graceful exit (analogous to the chat REPL's Ctrl-D).
+    let pick = dialoguer::Select::with_theme(&theme)
+        .with_prompt(prompt)
+        .items(&labels)
+        .default(0)
+        .interact_opt()?;
+    let pick = match pick {
+        Some(i) => i,
+        None => return Ok(()),
+    };
+
+    if pick == convs.len() {
+        // "[+] New conversation"
+        prompt_and_run_new(cfg).await
+    } else {
+        runner::run_resume(convs[pick].name.clone(), cfg).await
+    }
+}
+
+async fn prompt_and_run_new(cfg: &Config) -> Result<(), ChatError> {
+    let theme = ColorfulTheme::default();
+
+    let profiles = cfg.store.list_profiles().await?;
+    if profiles.is_empty() {
+        return Err(ChatError::NoProfiles);
+    }
+
+    let name: String = dialoguer::Input::with_theme(&theme)
+        .with_prompt("Conversation name")
+        .interact_text()?;
+
+    let profile_labels: Vec<String> = profiles
+        .iter()
+        .map(|p| {
+            format!(
+                "{id}  ·  {backend}/{provider}  ·  {auth}  ·  \"{name}\"",
+                id = p.id,
+                backend = p.backend.as_str(),
+                provider = p.provider,
+                auth = p.auth_method.as_str(),
+                name = p.name,
+            )
+        })
+        .collect();
+    let pick = dialoguer::Select::with_theme(&theme)
+        .with_prompt("Profile")
+        .default(0)
+        .items(&profile_labels)
+        .interact_opt()?;
+    let pick = match pick {
+        Some(i) => i,
+        None => return Ok(()),
+    };
+
+    runner::run_new(name, profiles[pick].id.clone(), None, cfg).await
 }
 
 async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
