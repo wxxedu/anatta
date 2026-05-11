@@ -9,6 +9,7 @@
 //! via [`sqlx::migrate!`]. Both CLI and daemon run them on startup;
 //! `sqlx::migrate` is idempotent.
 
+pub mod conversation;
 pub mod profile;
 
 use std::path::Path;
@@ -72,4 +73,6 @@ pub enum StoreError {
     UnknownBackend(String),
     #[error("unknown auth method: {0:?}")]
     UnknownAuthMethod(String),
+    #[error("conversation not found: {0}")]
+    ConversationNotFound(String),
 }

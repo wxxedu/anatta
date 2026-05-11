@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE conversations\n            SET lock_holder_pid = NULL\n            WHERE name = ? AND lock_holder_pid = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "bf99cb898eacb2593c6e2a9f02d1909e951ba219539b4ec8056f3552c400321c"
+}
