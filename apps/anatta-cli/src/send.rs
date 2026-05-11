@@ -119,7 +119,8 @@ async fn run_claude(
     cfg: &Config,
 ) -> Result<(), SendError> {
     let lock = maybe_acquire_chat_lock(resume.as_deref(), cfg).await?;
-    let launch = build_claude_launch(&record, prompt, resume, cwd, cfg)?;
+    let api_key = resolve_api_key(&record)?;
+    let launch = build_claude_launch(&record, api_key, prompt, resume, cwd, cfg)?;
     let session = spawn::launch(launch).await?;
     let exit = stream_session(session, json).await?;
     cfg.store.touch_profile(&record.id).await?;
@@ -130,14 +131,18 @@ async fn run_claude(
     enforce_exit("claude", exit)
 }
 
-/// Build a `ClaudeLaunch` from a stored profile + per-call inputs.
+/// Build a `ClaudeLaunch` from a stored profile + a pre-resolved
+/// api key.
 ///
-/// Shared by `anatta send` and `anatta chat`. The launch wraps the
-/// profile's CLAUDE_CONFIG_DIR plus a flat env list assembled from the
-/// provider spec + per-row overrides (api-key path) or `None` (login path,
-/// claude-cli reads its own keychain off CLAUDE_CONFIG_DIR).
+/// **The keychain read happens in [`resolve_api_key`], not here.** On
+/// macOS each keychain access can prompt the user for a password;
+/// callers that build many launches for the same profile (e.g.
+/// `anatta chat` issuing one launch per turn) must call
+/// `resolve_api_key` once outside the loop and pass the cached value
+/// in.
 pub(crate) fn build_claude_launch(
     record: &ProfileRecord,
+    api_key: Option<String>,
     prompt: String,
     resume: Option<String>,
     cwd: PathBuf,
@@ -147,13 +152,12 @@ pub(crate) fn build_claude_launch(
     let profile = ClaudeProfile::open(id, &cfg.anatta_home)?;
     let binary_path = auth::locate_binary("claude").ok_or(SendError::BinaryNotFound("claude"))?;
 
-    let provider = match record.auth_method {
-        AuthMethod::Login => None,
-        AuthMethod::ApiKey => {
+    let provider = match (record.auth_method, api_key) {
+        (AuthMethod::Login, _) => None,
+        (AuthMethod::ApiKey, None) => return Err(SendError::ApiKeyMissing(record.id.clone())),
+        (AuthMethod::ApiKey, Some(token)) => {
             let spec = providers::lookup(&record.provider)
                 .ok_or_else(|| SendError::UnknownProvider(record.provider.clone()))?;
-            let token = auth::read_api_key(&record.id)?
-                .ok_or_else(|| SendError::ApiKeyMissing(record.id.clone()))?;
             let overrides = Overrides {
                 base_url: record.base_url_override.clone(),
                 model: record.model_override.clone(),
@@ -177,6 +181,26 @@ pub(crate) fn build_claude_launch(
     })
 }
 
+/// Read the profile's api key from the OS keyring exactly once.
+///
+/// Returns `Ok(None)` for `AuthMethod::Login` profiles (the backend
+/// CLI does its own auth and no env injection is needed). For
+/// `AuthMethod::ApiKey`, returns `Ok(Some(token))` or
+/// `Err(ApiKeyMissing)` if the keyring has no entry.
+///
+/// **Callers that build many launches against the same profile must
+/// cache this value** — every call triggers a keychain access which on
+/// macOS can prompt the user for a password.
+pub(crate) fn resolve_api_key(record: &ProfileRecord) -> Result<Option<String>, SendError> {
+    match record.auth_method {
+        AuthMethod::Login => Ok(None),
+        AuthMethod::ApiKey => Ok(Some(
+            auth::read_api_key(&record.id)?
+                .ok_or_else(|| SendError::ApiKeyMissing(record.id.clone()))?,
+        )),
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Codex
 // ────────────────────────────────────────────────────────────────────────────
@@ -190,7 +214,8 @@ async fn run_codex(
     cfg: &Config,
 ) -> Result<(), SendError> {
     let lock = maybe_acquire_chat_lock(resume.as_deref(), cfg).await?;
-    let launch = build_codex_launch(&record, prompt, resume, cwd, cfg)?;
+    let api_key = resolve_api_key(&record)?;
+    let launch = build_codex_launch(&record, api_key, prompt, resume, cwd, cfg)?;
     let session = spawn::launch(launch).await?;
     let exit = stream_session(session, json).await?;
     cfg.store.touch_profile(&record.id).await?;
@@ -222,10 +247,11 @@ async fn maybe_acquire_chat_lock(
     }
 }
 
-/// Build a `CodexLaunch` from a stored profile + per-call inputs.
-/// Shared by `anatta send` and `anatta chat`.
+/// Build a `CodexLaunch` from a stored profile + a pre-resolved api
+/// key. See [`resolve_api_key`] re: caching across many calls.
 pub(crate) fn build_codex_launch(
     record: &ProfileRecord,
+    api_key: Option<String>,
     prompt: String,
     resume: Option<String>,
     cwd: PathBuf,
@@ -235,12 +261,16 @@ pub(crate) fn build_codex_launch(
     let profile = CodexProfile::open(id, &cfg.anatta_home)?;
     let binary_path = auth::locate_binary("codex").ok_or(SendError::BinaryNotFound("codex"))?;
 
+    // For login profiles `api_key` is `None`; codex finds its own
+    // creds via `CODEX_HOME/auth.json`. For api-key profiles, the
+    // caller is expected to have resolved a Some(_) — we treat None
+    // here as ApiKeyMissing to match the claude path.
     let api_key = match record.auth_method {
         AuthMethod::Login => None,
-        AuthMethod::ApiKey => Some(
-            auth::read_api_key(&record.id)?
-                .ok_or_else(|| SendError::ApiKeyMissing(record.id.clone()))?,
-        ),
+        AuthMethod::ApiKey => match api_key {
+            Some(k) => Some(k),
+            None => return Err(SendError::ApiKeyMissing(record.id.clone())),
+        },
     };
 
     Ok(CodexLaunch {

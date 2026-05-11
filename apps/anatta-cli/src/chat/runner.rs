@@ -145,6 +145,11 @@ async fn run_chat_claude(
     let mut backend_session_id = conv.backend_session_id.clone();
     let cwd = PathBuf::from(&conv.cwd);
 
+    // Read the keychain ONCE for the whole chat session. macOS
+    // prompts on every keychain access, so calling `resolve_api_key`
+    // per turn would pop a password dialog on every prompt we send.
+    let api_key = send::resolve_api_key(profile)?;
+
     loop {
         match input.read_prompt() {
             ReadOutcome::Eof | ReadOutcome::Interrupted => return Err(ChatError::InputClosed),
@@ -152,6 +157,7 @@ async fn run_chat_claude(
             ReadOutcome::Line(prompt) => {
                 let launch = send::build_claude_launch(
                     profile,
+                    api_key.clone(),
                     prompt,
                     backend_session_id.clone(),
                     cwd.clone(),
@@ -217,11 +223,18 @@ async fn run_chat_codex(
 ) -> Result<(), ChatError> {
     let cwd = PathBuf::from(&conv.cwd);
 
+    // Resolve api key once. (Codex persistent only spawns one process
+    // for the whole chat, so a single keychain read would have been
+    // sufficient anyway — passing the resolved value here matches
+    // claude's per-turn pattern.)
+    let api_key = send::resolve_api_key(profile)?;
+
     // The CodexLaunch wants a `prompt` field, but for the persistent
     // open path we don't send a prompt yet (each turn supplies its
     // own). Pass an empty placeholder.
     let launch = send::build_codex_launch(
         profile,
+        api_key,
         String::new(),
         conv.backend_session_id.clone(),
         cwd.clone(),
