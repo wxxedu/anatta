@@ -67,6 +67,28 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    /// Direct constructor for backends that don't go through
+    /// `finalize_first_event_session` (e.g. codex app-server, which
+    /// captures the thread id from a JSON-RPC response rather than a
+    /// first event).
+    pub(crate) fn new(
+        session_id: String,
+        child: Child,
+        events_rx: mpsc::Receiver<AgentEvent>,
+        stderr: stderr_buf::Handle,
+        started_at: std::time::Instant,
+        events_emitted: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        Self {
+            session_id,
+            child,
+            events_rx,
+            stderr,
+            started_at,
+            events_emitted,
+        }
+    }
+
     /// session_id (claude session UUID or codex thread UUID), known
     /// from the first event.
     pub fn session_id(&self) -> &str {

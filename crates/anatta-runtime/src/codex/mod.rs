@@ -16,6 +16,9 @@ pub mod history;
 pub mod stream;
 pub mod projector;
 
+#[cfg(feature = "spawn")]
+pub(crate) mod app_server;
+
 pub use projector::{HistoryProjector, StreamProjector};
 
 #[cfg(feature = "installer")]
