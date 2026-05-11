@@ -96,13 +96,30 @@ impl AgentSession {
         mut self,
         grace_period: Duration,
     ) -> Result<ExitInfo, SpawnError> {
+        self.cancel_mut_with_timeout(grace_period).await
+    }
+
+    /// Non-consuming cancel variant for callers that need to keep
+    /// the `AgentSession` value around (e.g., to drain remaining
+    /// events from the receiver after the child exits, or to call
+    /// `wait` from a different branch of a `select!`).
+    ///
+    /// Uses the same 3-second default grace period as [`cancel`].
+    pub async fn cancel_mut(&mut self) -> Result<ExitInfo, SpawnError> {
+        self.cancel_mut_with_timeout(Duration::from_secs(3)).await
+    }
+
+    /// Non-consuming cancel with explicit grace timeout.
+    pub async fn cancel_mut_with_timeout(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<ExitInfo, SpawnError> {
         // 1. Close stdin (drop) so the backend sees EOF.
         drop(self.child.stdin.take());
         // 2. Race the natural exit against the grace timer.
         let status = match tokio::time::timeout(grace_period, self.child.wait()).await {
             Ok(res) => res.map_err(SpawnError::Io)?,
             Err(_) => {
-                // Grace expired — escalate to SIGKILL.
                 let _ = self.child.start_kill();
                 self.child.wait().await.map_err(SpawnError::Io)?
             }
