@@ -45,6 +45,18 @@ rendered multi-turn session.
 - No chat-mode JSON output (use `anatta send --json --resume` for that).
 - No multi-host lock coordination (single-machine assumption).
 - No REPL meta commands beyond `/exit` and standard signals.
+- **No cross-tool lock coordination**: `anatta send --resume <id>` does not
+  consult the chat lock. A user running `send --resume X` while a `chat`
+  session is live against the same backend_session_id can corrupt the
+  underlying session file. Revisit if this bites; for v1, treat as user
+  responsibility (the chat lock exists only between `anatta chat` instances).
+- **Windows liveness fallback**: the PID liveness check uses `libc::kill(pid,
+  0)` on Unix. On Windows v1, `pid_alive` returns `true` unconditionally so
+  no automatic stale-lock reclaim happens — user runs `chat unlock`.
+  Phase 2 daemon work will replace this with a portable mechanism.
+- **Reboot PID-reuse**: across a host reboot, a leftover lock_holder_pid may
+  alias an unrelated live process. We do not record process-start time to
+  disambiguate; `chat unlock` is the escape hatch.
 
 ## Architecture
 
@@ -52,13 +64,13 @@ rendered multi-turn session.
 
 ```
 apps/anatta-cli
-  main.rs ──► chat/mod.rs
+  main.rs ──► chat/mod.rs                           ← typed error → exit code
                 │
                 ├─ Command::Chat {New,Resume,Ls,Rm,Unlock}
                 │
                 ├─ run_new/run_resume → chat/runner.rs
                 │                          │
-                │                          ├─ chat/lock.rs ──► sysinfo
+                │                          ├─ chat/lock.rs ──► libc::kill (cfg unix)
                 │                          │      │
                 │                          │      └─► store::conversation
                 │                          │
@@ -71,7 +83,11 @@ apps/anatta-cli
                 │                          │                ├─► markdown.rs ─► termimad
                 │                          │                └─ uses Palette from mod.rs
                 │                          │
-                │                          └─ runtime::spawn  (existing, unchanged)
+                │                          ├─ send::build_claude_launch (refactor target)
+                │                          ├─ send::build_codex_launch  (refactor target)
+                │                          │
+                │                          └─ runtime::spawn::AgentSession
+                │                                  ↑ NEW: cancel_mut(&mut self)
                 │
                 ├─ ls/rm/unlock impls (inline in mod.rs) → store::conversation
                 │
@@ -80,17 +96,21 @@ apps/anatta-cli
 crates/anatta-store
   lib.rs ──► profile.rs (existing, unchanged)
         └─► conversation.rs (new)
+
+crates/anatta-runtime
+  spawn/mod.rs (modified)                          ← add cancel_mut helper
 ```
 
 ### Crate boundary discipline
 
 | Boundary | Enforcement |
 |---|---|
-| `anatta-store` knows nothing about `sysinfo` | `try_acquire_with_check` accepts a `FnOnce(i64) -> bool` callback for liveness; CLI passes the sysinfo-backed check. |
+| `anatta-store` knows nothing about process liveness | `try_acquire_with_check` accepts a `FnOnce(i64) -> bool` callback; CLI passes the libc-backed check. |
 | `anatta-store` knows nothing about chat / rendering | New module `conversation.rs` is pure CRUD + lock SQL. |
 | `chat::runner` knows nothing about rendering details | Holds `&mut dyn EventRenderer`. |
 | `chat::render::line` knows nothing about termimad | All termimad calls go through `chat::render::markdown::render(&MadSkin, &str) -> String`. |
-| `anatta-runtime` is unchanged | The existing `spawn::launch` + `AgentSession` API is sufficient. |
+| `chat` does not duplicate `send`'s launch wiring | `send` exposes `pub(crate) build_claude_launch / build_codex_launch` helpers; chat calls them and reuses `SendError` for the launch-build path. |
+| `anatta-runtime` changes are minimal and additive | Adds `AgentSession::cancel_mut(&mut self) -> Result<ExitInfo, SpawnError>` so the chat loop can `tokio::select!` between event drain and Ctrl-C without consuming the session. No existing API breaks. |
 
 ## Data model
 
@@ -158,17 +178,24 @@ acquire lock (RAII guard, see Lock semantics)
         │       prompt, profile, cwd, ...
         │   }
         │
-        ├─ spawn::launch → AgentSession
-        │
-        ├─ if first turn (backend_session_id was NULL):
-        │       store.set_backend_session_id(name, session.session_id())
+        ├─ spawn::launch → AgentSession (first event already drained,
+        │                                so session.session_id() is known)
         │
         ├─ tokio::select! {
         │       drain events into renderer,
-        │       Ctrl-C → session.cancel(), continue loop,
+        │       Ctrl-C → session.cancel_mut().await; break inner loop
         │   }
         │
-        ├─ session.wait() → ExitInfo
+        ├─ session.wait().await → ExitInfo            (after natural drain)
+        │   OR cancel_mut path completed              (after Ctrl-C)
+        │
+        ├─ if first turn (backend_session_id was NULL):
+        │       store.set_backend_session_id(name, sid)
+        │   This commits the id even on cancelled/non-zero exit; the
+        │   backend has already written SessionStarted to its on-disk
+        │   session file, so the id is valid for future resume. A
+        │   cancelled first turn just resumes from a near-empty file.
+        │
         ├─ renderer.on_turn_end(&exit)
         ├─ store.touch_last_used(name)
         └─ continue
@@ -246,6 +273,7 @@ where
 pub struct ConversationGuard<'a> {
     store: &'a Store,
     name: String,
+    holder_pid: i64,        // the PID we wrote; release SQL must match it
     released: bool,
 }
 
@@ -253,8 +281,10 @@ impl<'a> ConversationGuard<'a> {
     pub async fn acquire(store: &'a Store, name: &str) -> Result<Self, ChatError> { ... }
 
     /// Explicit async release. Call this on the happy path before drop.
+    /// SQL is keyed on (name, holder_pid) so we never clear a lock that a
+    /// later acquirer (post force-unlock or post-stale-reclaim) now owns.
     pub async fn release_now(mut self) -> Result<(), ChatError> {
-        store.release_lock(&self.name).await?;
+        store.release_lock_if_held(&self.name, self.holder_pid).await?;
         self.released = true;
         Ok(())
     }
@@ -267,8 +297,9 @@ impl<'a> Drop for ConversationGuard<'a> {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let pool = self.store.pool().clone();
             let name = std::mem::take(&mut self.name);
+            let pid = self.holder_pid;
             handle.spawn(async move {
-                if let Err(e) = release_lock_query(&pool, &name).await {
+                if let Err(e) = release_lock_if_held_query(&pool, &name, pid).await {
                     eprintln!("[anatta] warn: failed to release lock for '{name}': {e}");
                 }
             });
@@ -277,21 +308,46 @@ impl<'a> Drop for ConversationGuard<'a> {
 }
 ```
 
+`release_lock_if_held` SQL:
+
+```sql
+UPDATE conversations
+SET lock_holder_pid = NULL
+WHERE name = ?1 AND lock_holder_pid = ?2;
+```
+
+A delayed Drop after force-unlock + reacquire by another process becomes a
+no-op (zero rows affected) instead of trampling the new holder.
+
 ### PID liveness
 
-Provided by `sysinfo`:
+Provided by `libc::kill(pid, 0)` on Unix (`libc` is already a transitive
+dependency via `tokio` / `sqlx`, so zero net new deps):
 
 ```rust
+#[cfg(unix)]
 fn pid_alive(pid: i64) -> bool {
-    let mut sys = sysinfo::System::new();
-    sys.refresh_processes();
-    sys.process(sysinfo::Pid::from(pid as usize)).is_some()
+    if pid <= 0 || pid > libc::pid_t::MAX as i64 { return false; }
+    // signal 0: do permission/existence check, do not deliver a signal.
+    // returns 0 on success (process exists and we may signal it),
+    // -1 on failure (errno = ESRCH no such process, EPERM exists but
+    //  we lack permission to signal it — still alive from our POV).
+    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if ret == 0 { return true; }
+    let errno = std::io::Error::last_os_error().raw_os_error();
+    errno == Some(libc::EPERM)  // EPERM means "exists, just no perm"
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: i64) -> bool {
+    // Windows: be conservative — assume alive. User must `chat unlock`.
+    true
 }
 ```
 
-`sysinfo` is cross-platform, ~6-7 transitive deps. Lighter than `nix` for the
-amount we need. CLI-only dep; the store crate stays free of process
-introspection.
+One syscall per check, no process-table refresh, no extra crates. Trade-off:
+Windows users lose automatic stale-lock reclaim and must run `chat unlock`
+manually. Documented in non-goals.
 
 ### Failure modes
 
@@ -388,23 +444,85 @@ pub(crate) trait EventRenderer {
 
 CLI-internal trait. No public API surface; signature changes are free.
 
+### Delta + final emission model
+
+Both projectors emit BOTH delta and final variants today (verified in
+`crates/anatta-runtime/src/claude/projector.rs:248,373` and
+`crates/anatta-runtime/src/codex/projector.rs:303,328`). Snapshot semantics:
+each `*Delta` carries the FULL accumulated text in `text_so_far`. The
+final `AssistantText` / `Thinking` carries the same text once the block
+closes.
+
+Codex always uses `content_block_index = 0` (single AgentMessage per item);
+Claude uses real per-block indices (a turn can have many text blocks
+interleaved with thinking and tool blocks).
+
+Policy:
+
+- **TTY mode**: paint each delta in place (cursor anchor + clear + redraw);
+  the final variant for the same logical block is then a no-op (text already
+  on screen). Implementation: when a final arrives, locate the open
+  region for its block and mark closed; do not repaint.
+- **Non-TTY mode**: skip all delta variants entirely; paint only the final.
+
+This avoids the "match final to delta by index" ambiguity (final lacks an
+index): in TTY mode we never need to match because the screen is already
+correct. In non-TTY mode we don't paint deltas, so finals are the sole
+source.
+
 ### `LineRenderer` per-payload behavior
 
-| Payload | Treatment |
-|---|---|
-| `SessionStarted` | No-op. Banner already printed. |
-| `TurnStarted`, `UserPrompt` | No-op. |
-| `AssistantText` | `markdown::render(&skin, text)` → write. Final variants do not carry `content_block_index`. Policy: maintain `last_open_text_block: Option<u32>`; if set, clear from its anchor row first, then unset. Otherwise append at cursor. |
-| `AssistantTextDelta` | Forward-looking (projector v1 doesn't emit). On tty: clear from anchor → re-render full `text_so_far` via markdown; set `last_open_text_block = Some(content_block_index)`. Non-tty: skip. |
-| `Thinking` | Dim grey, prefix `│` per line, no markdown. Default fully expanded. |
-| `ThinkingDelta` | Same anchoring as AssistantTextDelta, dim grey. |
-| `ToolUse { name, input, id }` | Cyan one-line: `⚙ Read(file_path="…", limit=200)`. Fields: take first 2 from object, value-truncate to 60 chars, " …+N fields" if more. Record (id → cursor row, name) in tool_anchors. |
-| `ToolUseInputDelta` | Skip in v1. |
-| `ToolResult { tool_use_id, success, text }` | Backfill onto the ToolUse anchor row: ` ✓ 47 lines` (green) or ` ✗ exit 101` (red). If text > 200 chars, render dim 4-line preview below + "…(M lines more)". If anchor scrolled away, fallback to a new line `↩ <name> ✓/✗`. |
-| `Usage` | Dim: `· 1.2k in · 480 out · $0.0034`. Cost omitted if None. |
-| `TurnCompleted` | Render terminal-width separator + blank line. |
-| `RateLimit` | Yellow `⚠ rate limit ({kind}) — resets at <iso>`. |
-| `Error { fatal }` | Red `✗ error: <msg>`. Fatal adds line "session terminated". |
+| Payload | TTY treatment | Non-TTY treatment |
+|---|---|---|
+| `SessionStarted` | No-op (banner already printed). | Same. |
+| `TurnStarted`, `UserPrompt` | No-op. | Same. |
+| `AssistantTextDelta { idx, text_so_far }` | If no anchor for `idx`: capture cursor row, paint `markdown::render(text_so_far)`. Else: cursor-move to anchor → clear-down → repaint markdown. Update `last_lines` from painted height. | Skip. |
+| `AssistantText { text }` | Find open anchor (lowest unclosed block_index); if found, mark closed (text already painted). If none open, paint markdown at cursor. | Paint markdown at cursor. |
+| `ThinkingDelta { idx, text_so_far }` | Same anchor mechanics, dim grey, `│ ` per line, no markdown. | Skip. |
+| `Thinking { text }` | Same close-only logic as AssistantText. If no anchor open, paint dim grey block. | Paint dim grey block. |
+| `ToolUse { name, input, id }` | Cyan one-line: `⚙ Read(file_path="…", limit=200)`. First 2 object fields, truncate values to 60 chars, " …+N fields" if more. If input not object, `to_string()` truncated to 100. Record `(id → anchor_row, name, finalized=false)` in tool_anchors. | Same, no anchor recording. |
+| `ToolUseInputDelta` | Skip (matches the "minimal" decision; codex never emits it). | Skip. |
+| `ToolResult { tool_use_id, success, text, structured }` | Locate anchor for `tool_use_id`. **Summary** = first present of: text head (60 chars), structured one-line JSON head (60 chars), or "(no output)". Backfill on anchor row: ` ✓ <summary>` (green) or ` ✗ <summary>` (red). If text > 200 chars, render dim 4-line preview below + "…(M lines more)". If anchor missing/scrolled-away, print a new line `↩ <name> ✓/✗ <summary>`. Mark anchor `finalized = true`. | Same minus cursor moves: print full one-line tool/result on a single line, no backfill. |
+| `Usage` | Dim: `· 1.2k in · 480 out · $0.0034`. Cost omitted if None. | Same minus dim color. |
+| `TurnCompleted` | For each tool_anchor with `finalized=false`, append ` …` (faint, no result indicator — codex WebSearch/TodoList never emit ToolResult; this is normal). Then render terminal-width separator + blank line. Reset all anchors. | Same minus separator coloring. |
+| `RateLimit` | Yellow `⚠ rate limit ({kind}) — resets at <iso>`. | Same minus color. |
+| `Error { fatal }` | Red `✗ error: <msg>`. Fatal adds line "session terminated". | Same minus color. |
+
+### Anchor data structures
+
+```rust
+struct LineRenderer {
+    is_tty: bool,
+    text_blocks: BTreeMap<u32, TextAnchor>,       // open assistant text blocks
+    thinking_blocks: BTreeMap<u32, TextAnchor>,   // open thinking blocks
+    tool_anchors: HashMap<String, ToolAnchor>,    // by tool_use_id
+    skin: termimad::MadSkin,
+}
+
+struct TextAnchor {
+    start_row: u16,
+    last_lines: u16,
+    closed: bool,    // set when matching final arrives; kept until TurnCompleted resets
+}
+
+struct ToolAnchor {
+    row: u16,
+    name: String,
+    finalized: bool,
+}
+```
+
+### Codex `index = 0` collision handling
+
+Codex never opens more than one AssistantTextDelta block per turn (single
+AgentMessage item). With one open block at index 0, the BTreeMap holds at
+most one entry — no collision in practice. Claude can have multiple text
+blocks at distinct indices, also fine. The renderer does not need to
+distinguish backends.
+
+If a future projector ever emits two open codex blocks with index=0 (it
+doesn't today), the second one would clobber the first's anchor; this is
+out of scope for v1 and would need projector cooperation to fix.
 
 ### Markdown rendering (`markdown.rs`)
 
@@ -549,7 +667,12 @@ Use `insta` against a `Vec<u8>` writer instead of stdout.
 
 ### `apps/anatta-cli/tests/chat_e2e.rs`
 
-Reuses the existing mock-backend infrastructure (`spawn_mock`).
+`crates/anatta-runtime/tests/spawn_mock.rs` lives in another crate's
+integration test tree and is not importable. The CLI test file duplicates
+the minimal mock-binary harness (~30 lines: write a small shell/rust script
+that prints NDJSON for SessionStarted + AssistantText + TurnCompleted,
+chmod +x, point `binary_path` at it). Keep it inline; do not promote
+spawn_mock to a `mock` feature for v1.
 
 - First turn writes `backend_session_id` to row
 - Second turn passes `--resume <id>` argument
@@ -588,13 +711,15 @@ Reuses the existing mock-backend infrastructure (`spawn_mock`).
 | `apps/anatta-cli/src/chat/render/markdown.rs` | 50 | `build_skin`, `render` — termimad encapsulation. |
 | `apps/anatta-cli/tests/chat_e2e.rs` | 150 | 4 integration tests (see Testing). |
 
-### Modified files (3)
+### Modified files (5)
 
 | Path | Change |
 |---|---|
 | `crates/anatta-store/src/lib.rs` | `pub mod conversation;` |
-| `apps/anatta-cli/src/main.rs` | `mod chat;` + `Command::Chat` variant + dispatch arm. |
-| `apps/anatta-cli/Cargo.toml` | Add `crossterm`, `termimad`, `rustyline`, `sysinfo`; dev-dep `insta`. |
+| `crates/anatta-runtime/src/spawn/mod.rs` | Add `pub async fn cancel_mut(&mut self) -> Result<ExitInfo, SpawnError>`. Refactor existing `cancel(self)` to delegate to it (or keep as-is and have both). Surface change is purely additive; no existing callers need to change. |
+| `apps/anatta-cli/src/send.rs` | Extract `pub(crate) async fn build_claude_launch(record, prompt, resume, cwd, cfg) -> Result<ClaudeLaunch, SendError>` and `pub(crate) async fn build_codex_launch(...)` from inside `run_claude` / `run_codex`. The existing `run_*` functions become thin wrappers that call the builder + `spawn::launch` + `stream_session`. |
+| `apps/anatta-cli/src/main.rs` | `mod chat;` + `Command::Chat` variant + dispatch arm. **Refactor error handling**: replace `result.map_err(|e| e.to_string())` with a typed dispatch (e.g. `match` on each command's error type) so `chat::ChatError::InputClosed` can map to `exit(0)` without printing the `anatta:` prefix. |
+| `apps/anatta-cli/Cargo.toml` | Add `crossterm`, `termimad`, `rustyline`, `libc`; dev-dep `insta`. |
 
 ### New dependencies
 
@@ -603,12 +728,12 @@ Reuses the existing mock-backend infrastructure (`spawn_mock`).
 | `crossterm` | Cursor, style, IsTerminal | ~8 |
 | `termimad` | Markdown → ANSI | ~8 (minimad, lazy-regex, unicode-width, coolor, ...) |
 | `rustyline` | Line editing + history | ~10 |
-| `sysinfo` | PID liveness | ~6 |
+| `libc` | `kill(pid, 0)` PID liveness on Unix; already a transitive dep, made direct | 0 net new |
 | `insta` (dev) | Snapshot tests | ~12 |
 
-No changes to `anatta-runtime`, `anatta-core`, `anatta-worktree`,
-`anatta-server-core`, `anatta-daemon-core`, or any binary other than
-`anatta-cli`.
+`anatta-runtime` gets a small additive API change (`cancel_mut`). No other
+crates touched. `anatta-core`, `anatta-worktree`, `anatta-server-core`,
+`anatta-daemon-core`, `anatta-server`, `anatta-daemon` are unchanged.
 
 ## Out of scope (revisit later)
 
@@ -626,6 +751,15 @@ No changes to `anatta-runtime`, `anatta-core`, `anatta-worktree`,
 
 ## Open questions
 
-None remaining at design time. Implementation may surface termimad quirks
-(unclosed code fences during streaming, OSC 8 hyperlink behavior on legacy
-terminals); both have documented fallback strategies above.
+None blocking implementation. Known residuals:
+
+- termimad quirks (unclosed code fences during delta streaming, OSC 8
+  hyperlink behavior on legacy terminals) — both have documented fallback
+  strategies above.
+- SELECT-then-UPDATE in `try_acquire_with_check` has no retry path; a
+  failed SQLite serialization surfaces as `StoreError::Sqlx` and the user
+  re-runs `chat resume`. Acceptable for v1 single-user usage.
+- Cancelled first turn leaves the backend session file with only
+  `SessionStarted` (and possibly partial UserPrompt) events. Resume from
+  this state works (claude/codex accept short histories) but produces a
+  visually empty first turn on replay. Documented behavior, not a bug.
