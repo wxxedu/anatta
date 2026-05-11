@@ -8,12 +8,13 @@
 //!   `Launchable` contract used by all backends.
 //!
 //! * `anatta chat` (long-lived, many turns):
-//!   `PersistentCodexSession::open()` → instance with `send_turn(prompt)`
-//!   and `interrupt_current_turn()`. The codex app-server stays alive
-//!   for the entire chat session; each turn is just a `turn/start`
-//!   request, eliminating the ~200-500ms handshake-per-turn cost and
-//!   matching codex's intended client model (the VS Code extension
-//!   does the same).
+//!   `PersistentCodexSession::open()` → instance with `send_turn(prompt)`,
+//!   plus a clone-friendly [`CodexInterruptHandle`] (via
+//!   [`PersistentCodexSession::interrupt_handle`]) for cancelling the
+//!   active turn from outside. The codex app-server stays alive for the
+//!   entire chat session; each turn is just a `turn/start` request,
+//!   eliminating the ~200-500ms handshake-per-turn cost and matching
+//!   codex's intended client model (the VS Code extension does the same).
 //!
 //! Per-turn protocol (one-shot mode):
 //!
@@ -173,10 +174,11 @@ impl Launchable for CodexLaunch {
 /// and returns a [`TurnHandle`] whose event channel drains until the
 /// turn's `turn/completed` notification.
 ///
-/// Cancellation is per-turn: `interrupt_current_turn` sends
-/// `turn/interrupt` (codex emits `turn/completed { status:
-/// "interrupted" }` shortly after, which closes the handle's channel
-/// naturally — the session itself stays open).
+/// Cancellation is per-turn via [`CodexInterruptHandle`] (obtained from
+/// [`interrupt_handle`](Self::interrupt_handle)): it sends
+/// `turn/interrupt`; codex emits `turn/completed { status:
+/// "interrupted" }` shortly after, closing the handle's channel
+/// naturally — the session itself stays open.
 ///
 /// Closing the session (`close`) writes EOF on stdin so codex shuts
 /// down cleanly and the child exits with status 0.
@@ -188,12 +190,58 @@ pub struct PersistentCodexSession {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     thread_id: String,
     cwd_str: String,
-    next_request_id: AtomicI64,
+    next_request_id: Arc<AtomicI64>,
     /// The currently-active turn's state, or None when idle.
     active_turn: Arc<Mutex<Option<ActiveTurn>>>,
     stderr: stderr_buf::Handle,
     started_at: Instant,
     events_emitted: Arc<AtomicU64>,
+}
+
+/// Clonable handle for interrupting the currently-active turn of a
+/// [`PersistentCodexSession`] from outside the session struct itself.
+///
+/// Created via [`PersistentCodexSession::interrupt_handle`]. All fields
+/// are cheap-to-clone (Arc / String). The handle keeps the inner
+/// state alive only as long as needed — if the session is dropped, the
+/// stdin/active_turn it points to become inert (subsequent
+/// `interrupt()` calls find no active turn and no-op).
+#[derive(Clone)]
+pub struct CodexInterruptHandle {
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    thread_id: String,
+    next_request_id: Arc<AtomicI64>,
+    active_turn: Arc<Mutex<Option<ActiveTurn>>>,
+}
+
+impl CodexInterruptHandle {
+    /// Send `turn/interrupt` for the currently-active turn. No-op if no
+    /// turn is active or the session is closed. See
+    /// [`PersistentCodexSession::interrupt_current_turn`].
+    pub async fn interrupt(&self) -> Result<(), SpawnError> {
+        let turn_id = {
+            let active = self.active_turn.lock().await;
+            match &*active {
+                Some(t) => t.turn_id.clone(),
+                None => return Ok(()),
+            }
+        };
+        let Some(tid) = turn_id else {
+            return Ok(());
+        };
+        let req_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
+        let mut stdin_guard = self.stdin.lock().await;
+        let Some(stdin) = stdin_guard.as_mut() else {
+            return Ok(()); // session closed
+        };
+        write_request(
+            stdin,
+            req_id,
+            "turn/interrupt",
+            serde_json::json!({ "threadId": &self.thread_id, "turnId": tid }),
+        )
+        .await
+    }
 }
 
 struct ActiveTurn {
@@ -269,7 +317,7 @@ impl PersistentCodexSession {
             stdin,
             thread_id,
             cwd_str,
-            next_request_id: AtomicI64::new(FIRST_TURN_REQUEST_ID),
+            next_request_id: Arc::new(AtomicI64::new(FIRST_TURN_REQUEST_ID)),
             active_turn,
             stderr,
             started_at,
@@ -279,6 +327,18 @@ impl PersistentCodexSession {
 
     pub fn thread_id(&self) -> &str {
         &self.thread_id
+    }
+
+    /// Clone-friendly handle for interrupting the active turn from
+    /// outside (e.g., a [`TurnEvents`](crate::session::TurnEvents)
+    /// wrapper that owns the channel but not the session).
+    pub fn interrupt_handle(&self) -> CodexInterruptHandle {
+        CodexInterruptHandle {
+            stdin: self.stdin.clone(),
+            thread_id: self.thread_id.clone(),
+            next_request_id: self.next_request_id.clone(),
+            active_turn: self.active_turn.clone(),
+        }
     }
 
     /// Start a new turn. Refuses if a previous turn is still active.
@@ -332,38 +392,6 @@ impl PersistentCodexSession {
         .await?;
 
         Ok(TurnHandle { events_rx })
-    }
-
-    /// Send `turn/interrupt` for the currently-active turn (if any).
-    /// codex responds with `turn/completed { status: "interrupted" }`
-    /// which the reader loop will translate into an `AgentEvent::
-    /// TurnCompleted` and close the turn's channel.
-    pub async fn interrupt_current_turn(&self) -> Result<(), SpawnError> {
-        let turn_id = {
-            let active = self.active_turn.lock().await;
-            match &*active {
-                Some(t) => t.turn_id.clone(),
-                None => return Ok(()), // no active turn — no-op
-            }
-        };
-        let Some(tid) = turn_id else {
-            // Turn started but turn/started not yet observed; can't
-            // interrupt without a turn id. Race window is short
-            // (milliseconds). Skip rather than error.
-            return Ok(());
-        };
-        let req_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
-        let mut stdin_guard = self.stdin.lock().await;
-        let stdin = stdin_guard
-            .as_mut()
-            .ok_or_else(|| SpawnError::Io(std::io::Error::other("session already closed")))?;
-        write_request(
-            stdin,
-            req_id,
-            "turn/interrupt",
-            serde_json::json!({ "threadId": &self.thread_id, "turnId": tid }),
-        )
-        .await
     }
 
     /// Close the session: drop stdin (graceful EOF → codex exits),

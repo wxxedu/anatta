@@ -1,42 +1,35 @@
-//! Chat loop entry points.
+//! Chat loop entry point.
 //!
-//! `run_new` / `run_resume` set up the lock + banner + input reader,
-//! then dispatch on the profile's backend kind:
+//! Backend differences (claude per-turn spawn, codex persistent
+//! app-server) are hidden inside [`Session`](anatta_runtime::spawn::Session);
+//! the loop here is backend-agnostic.
 //!
-//! * **Claude**: spawn-per-turn. Each prompt creates a fresh
-//!   `AgentSession` via `spawn::launch(ClaudeLaunch)`, drains events,
-//!   the child exits, repeat.
+//! Per-turn cancellation goes through [`TurnEvents::cancel`]
+//! (claude: SIGKILL the child with a 3s grace; codex: send
+//! `turn/interrupt`, channel closes naturally and the session stays
+//! alive for the next prompt).
 //!
-//! * **Codex**: persistent-per-chat. Open `codex app-server` once via
-//!   `PersistentCodexSession::open`. Per prompt, `send_turn` issues a
-//!   `turn/start` JSON-RPC request and returns a `TurnHandle` whose
-//!   channel drains until `turn/completed`. The server stays alive
-//!   between turns (the codex thread is kept hot — no handshake
-//!   overhead, no per-turn 200ms penalty).
-//!
-//! Cancellation also differs:
-//!
-//! * Claude Ctrl-C: `session.cancel_mut()` → SIGTERM/SIGKILL the child.
-//! * Codex Ctrl-C: `session.interrupt_current_turn()` → JSON-RPC
-//!   `turn/interrupt`. codex emits `turn/completed { status:
-//!   "interrupted" }` which closes the turn channel naturally; the
-//!   session itself stays open and the next prompt continues.
+//! Profile swap (`/profile`) calls [`Session::swap`] with a freshly
+//! resolved [`BackendLaunch`]; cross-backend swap is rejected at the
+//! slash-command layer (see `super::slash`), defense-in-depth-rejected
+//! again by `Session::swap` itself.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anatta_runtime::spawn::{self, AgentSession, PersistentCodexSession, TurnHandle};
+use anatta_runtime::spawn::{Session, TurnEvents};
 use anatta_runtime::{LockError, SessionLock};
 use anatta_store::conversation::{ConversationRecord, NewConversation};
-use anatta_store::profile::{BackendKind, ProfileRecord};
+use anatta_store::profile::ProfileRecord;
 use tokio::sync::Notify;
 
 use super::input::{InputReader, ReadOutcome};
 use super::render::line::LineRenderer;
 use super::render::EventRenderer;
+use super::slash::{self, SlashOutcome};
 use super::ChatError;
 use crate::config::Config;
-use crate::send;
+use crate::launch;
 
 pub(crate) async fn run_new(
     name: String,
@@ -116,14 +109,7 @@ async fn drive_chat(
     let mut renderer = LineRenderer::new();
     let mut input = InputReader::new(&cfg.anatta_home)?;
 
-    let result = match profile.backend {
-        BackendKind::Claude => {
-            run_chat_claude(&conv, &profile, cfg, &mut renderer, &mut input).await
-        }
-        BackendKind::Codex => {
-            run_chat_codex(&conv, &profile, cfg, &mut renderer, &mut input).await
-        }
-    };
+    let result = run_chat(&conv, profile, cfg, &mut renderer, &mut input).await;
 
     renderer.on_chat_end();
     input.save_history();
@@ -131,124 +117,33 @@ async fn drive_chat(
     result
 }
 
-// ──────────────────────────────────────────────────────────────────────
-// Claude: per-turn spawn
-// ──────────────────────────────────────────────────────────────────────
-
-async fn run_chat_claude(
+async fn run_chat(
     conv: &ConversationRecord,
-    profile: &ProfileRecord,
-    cfg: &Config,
-    renderer: &mut LineRenderer,
-    input: &mut InputReader,
-) -> Result<(), ChatError> {
-    let mut backend_session_id = conv.backend_session_id.clone();
-    let cwd = PathBuf::from(&conv.cwd);
-
-    // Read the keychain ONCE for the whole chat session. macOS
-    // prompts on every keychain access, so calling `resolve_api_key`
-    // per turn would pop a password dialog on every prompt we send.
-    let api_key = send::resolve_api_key(profile, cfg)?;
-
-    loop {
-        match input.read_prompt() {
-            ReadOutcome::Eof | ReadOutcome::Interrupted => return Err(ChatError::InputClosed),
-            ReadOutcome::Line(s) if s.is_empty() => continue,
-            ReadOutcome::Line(prompt) => {
-                let launch = send::build_claude_launch(
-                    profile,
-                    api_key.clone(),
-                    prompt,
-                    backend_session_id.clone(),
-                    cwd.clone(),
-                    cfg,
-                )?;
-                let session = spawn::launch(launch).await?;
-                let session_id = session.session_id().to_owned();
-                drain_claude_session(session, renderer).await?;
-                if backend_session_id.is_none() {
-                    cfg.store
-                        .set_backend_session_id(&conv.name, &session_id)
-                        .await?;
-                    backend_session_id = Some(session_id);
-                }
-                cfg.store.touch_conversation(&conv.name).await?;
-            }
-        }
-    }
-}
-
-async fn drain_claude_session(
-    mut session: AgentSession,
-    renderer: &mut LineRenderer,
-) -> Result<(), ChatError> {
-    let cancel = Arc::new(Notify::new());
-    let cancel_in_task = cancel.clone();
-    let ctrl_c_task = tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        cancel_in_task.notify_one();
-    });
-
-    let cancelled = loop {
-        tokio::select! {
-            biased;
-            _ = cancel.notified() => break true,
-            ev = session.events().recv() => match ev {
-                Some(e) => renderer.on_event(&e),
-                None => break false,
-            }
-        }
-    };
-    ctrl_c_task.abort();
-
-    if cancelled {
-        session.cancel_mut().await?;
-    } else {
-        session.wait().await?;
-    }
-    renderer.on_turn_end();
-    Ok(())
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Codex: persistent app-server, per-turn TurnHandle
-// ──────────────────────────────────────────────────────────────────────
-
-async fn run_chat_codex(
-    conv: &ConversationRecord,
-    profile: &ProfileRecord,
+    profile: ProfileRecord,
     cfg: &Config,
     renderer: &mut LineRenderer,
     input: &mut InputReader,
 ) -> Result<(), ChatError> {
     let cwd = PathBuf::from(&conv.cwd);
+    let mut profile = profile;
 
-    // Resolve api key once. (Codex persistent only spawns one process
-    // for the whole chat, so a single keychain read would have been
-    // sufficient anyway — passing the resolved value here matches
-    // claude's per-turn pattern.)
-    let api_key = send::resolve_api_key(profile, cfg)?;
-
-    // The CodexLaunch wants a `prompt` field, but for the persistent
-    // open path we don't send a prompt yet (each turn supplies its
-    // own). Pass an empty placeholder.
-    let launch = send::build_codex_launch(
-        profile,
-        api_key,
-        String::new(),
-        conv.backend_session_id.clone(),
+    let launch = launch::build_launch(
+        &profile,
         cwd.clone(),
+        conv.backend_session_id.clone(),
         cfg,
     )?;
-    let session = PersistentCodexSession::open(launch).await?;
+    let mut session = Session::open(launch).await?;
 
-    // Persist the thread id immediately. For a fresh conversation
-    // this is the first time we know it; for a resumed conversation
-    // it should match the recorded value (no-op if already set).
-    if conv.backend_session_id.is_none() {
-        cfg.store
-            .set_backend_session_id(&conv.name, session.thread_id())
-            .await?;
+    // Persist the thread id on first turn (claude needs the system/init
+    // event to capture it; codex gets it from thread/start). For codex
+    // it's already known at open time.
+    let mut backend_session_id = conv.backend_session_id.clone();
+    if backend_session_id.is_none() {
+        if let Some(id) = session.thread_id() {
+            cfg.store.set_backend_session_id(&conv.name, id).await?;
+            backend_session_id = Some(id.to_owned());
+        }
     }
 
     let result: Result<(), ChatError> = loop {
@@ -257,24 +152,69 @@ async fn run_chat_codex(
                 break Err(ChatError::InputClosed);
             }
             ReadOutcome::Line(s) if s.is_empty() => continue,
+            ReadOutcome::Line(s) if s.starts_with('/') => {
+                match slash::handle(&s, &profile, cfg).await {
+                    Ok(SlashOutcome::Continue) => continue,
+                    Ok(SlashOutcome::Exit) => break Err(ChatError::InputClosed),
+                    Ok(SlashOutcome::SwapProfile { new_profile }) => {
+                        let new_profile = *new_profile;
+                        let new_launch = match launch::build_launch(
+                            &new_profile,
+                            cwd.clone(),
+                            backend_session_id.clone(),
+                            cfg,
+                        ) {
+                            Ok(l) => l,
+                            Err(e) => {
+                                eprintln!("✗ build_launch failed: {e}");
+                                continue;
+                            }
+                        };
+                        if let Err(e) = session.swap(new_launch).await {
+                            eprintln!("✗ swap failed: {e}");
+                            continue;
+                        }
+                        if let Err(e) = cfg
+                            .store
+                            .set_conversation_profile(&conv.name, &new_profile.id)
+                            .await
+                        {
+                            break Err(e.into());
+                        }
+                        eprintln!("→ swapped to profile '{}'", new_profile.id);
+                        profile = new_profile;
+                        continue;
+                    }
+                    Err(e) => break Err(e),
+                }
+            }
             ReadOutcome::Line(prompt) => {
-                let turn = session.send_turn(&prompt).await?;
-                if let Err(e) = drain_codex_turn(&session, turn, renderer).await {
+                let turn = match session.send_turn(&prompt).await {
+                    Ok(t) => t,
+                    Err(e) => break Err(e.into()),
+                };
+                if let Err(e) = drain_turn(turn, renderer).await {
                     break Err(e);
+                }
+                // For claude, first turn produced the session UUID;
+                // persist if we didn't have one yet.
+                if backend_session_id.is_none() {
+                    if let Some(id) = session.thread_id() {
+                        cfg.store.set_backend_session_id(&conv.name, id).await?;
+                        backend_session_id = Some(id.to_owned());
+                    }
                 }
                 cfg.store.touch_conversation(&conv.name).await?;
             }
         }
     };
 
-    // Graceful close: send EOF on stdin → codex exits cleanly.
     let _ = session.close().await;
     result
 }
 
-async fn drain_codex_turn(
-    session: &PersistentCodexSession,
-    mut turn: TurnHandle,
+async fn drain_turn(
+    mut turn: TurnEvents,
     renderer: &mut LineRenderer,
 ) -> Result<(), ChatError> {
     let cancel = Arc::new(Notify::new());
@@ -284,33 +224,29 @@ async fn drain_codex_turn(
         cancel_in_task.notify_one();
     });
 
-    // Codex cancellation = send turn/interrupt and keep draining.
-    // codex emits turn/completed { status: "interrupted" } which
-    // closes the channel naturally; the session stays open and the
-    // next prompt continues.
-    let mut interrupt_sent = false;
+    let mut interrupted = false;
     loop {
         tokio::select! {
             biased;
-            _ = cancel.notified(), if !interrupt_sent => {
-                interrupt_sent = true;
-                let _ = session.interrupt_current_turn().await;
-                // Keep draining until turn/completed closes the channel.
+            _ = cancel.notified(), if !interrupted => {
+                interrupted = true;
+                let _ = turn.cancel().await;
             }
-            ev = turn.events().recv() => match ev {
+            ev = turn.recv() => match ev {
                 Some(e) => renderer.on_event(&e),
                 None => break,
             }
         }
     }
     ctrl_c_task.abort();
+    // For claude, harvest the per-turn child's exit info (otherwise
+    // the child becomes a zombie until kill_on_drop fires). We don't
+    // act on a non-zero exit here — the rendered Error events already
+    // surfaced any failure to the user.
+    let _ = turn.finalize().await;
     renderer.on_turn_end();
     Ok(())
 }
-
-// ──────────────────────────────────────────────────────────────────────
-// Shared
-// ──────────────────────────────────────────────────────────────────────
 
 fn print_banner(conv: &ConversationRecord, profile: &ProfileRecord, resumed: bool) {
     let suffix = if resumed { " (resumed)" } else { "" };

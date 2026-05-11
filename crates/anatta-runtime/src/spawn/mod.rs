@@ -26,11 +26,15 @@ mod claude;
 mod codex;
 mod ids;
 pub(crate) mod pipeline;
+mod session;
 mod stderr_buf;
 
 pub use claude::ClaudeLaunch;
-pub use codex::{CodexLaunch, PersistentCodexSession, TurnHandle};
+pub use codex::{CodexInterruptHandle, CodexLaunch, PersistentCodexSession, TurnHandle};
 pub use ids::{ClaudeSessionId, CodexThreadId};
+pub use session::{
+    BackendKind, BackendLaunch, ClaudeSession, CodexSession, Session, SwapError, TurnEvents,
+};
 
 use std::path::PathBuf;
 use std::time::Duration;

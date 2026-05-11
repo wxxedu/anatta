@@ -165,6 +165,27 @@ impl Store {
         Ok(())
     }
 
+    /// Swap the profile a conversation is associated with. Used by the
+    /// in-chat `/profile` command for same-backend reconfiguration
+    /// (claude→claude with different API key, codex→codex with
+    /// different env). The caller is responsible for verifying the new
+    /// profile's backend matches the existing conversation's backend
+    /// (the store doesn't enforce it because the column isn't denormalized).
+    pub async fn set_conversation_profile(
+        &self,
+        name: &str,
+        new_profile_id: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query!(
+            "UPDATE conversations SET profile_id = ? WHERE name = ?",
+            new_profile_id,
+            name,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Set the backend session id (claude session UUID / codex thread UUID).
     /// No-op if already non-NULL — the id is immutable across the lifetime
     /// of the conversation.

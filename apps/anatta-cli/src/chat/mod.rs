@@ -24,6 +24,7 @@ use crate::config::Config;
 mod input;
 mod render;
 mod runner;
+mod slash;
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -79,6 +80,8 @@ pub enum ChatError {
 
     #[error(transparent)]
     Send(#[from] crate::send::SendError),
+    #[error(transparent)]
+    Launch(#[from] crate::launch::LaunchError),
     #[error(transparent)]
     Store(#[from] anatta_store::StoreError),
     #[error(transparent)]
@@ -228,7 +231,7 @@ async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
         return Ok(());
     }
     let now = Utc::now();
-    println!("{:<20} {:<22} {:<14} {}", "NAME", "PROFILE", "LAST USED", "STATUS");
+    println!("{:<20} {:<22} {:<14} STATUS", "NAME", "PROFILE", "LAST USED");
     for row in rows {
         let status = if SessionLock::is_held(&cfg.anatta_home, &row.name) {
             "🔒 in use".to_owned()
