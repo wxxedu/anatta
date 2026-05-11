@@ -45,18 +45,13 @@ rendered multi-turn session.
 - No chat-mode JSON output (use `anatta send --json --resume` for that).
 - No multi-host lock coordination (single-machine assumption).
 - No REPL meta commands beyond `/exit` and standard signals.
-- **No cross-tool lock coordination**: `anatta send --resume <id>` does not
-  consult the chat lock. A user running `send --resume X` while a `chat`
-  session is live against the same backend_session_id can corrupt the
-  underlying session file. Revisit if this bites; for v1, treat as user
-  responsibility (the chat lock exists only between `anatta chat` instances).
-- **Windows liveness fallback**: the PID liveness check uses `libc::kill(pid,
-  0)` on Unix. On Windows v1, `pid_alive` returns `true` unconditionally so
-  no automatic stale-lock reclaim happens — user runs `chat unlock`.
-  Phase 2 daemon work will replace this with a portable mechanism.
-- **Reboot PID-reuse**: across a host reboot, a leftover lock_holder_pid may
-  alias an unrelated live process. We do not record process-start time to
-  disambiguate; `chat unlock` is the escape hatch.
+- *(superseded)* Earlier drafts called out cross-tool lock gaps,
+  Windows-only liveness fallback, and reboot PID reuse as residuals.
+  v1.1 closed all three: `anatta send --resume <id>` now consults
+  `conversations.backend_session_id` and acquires the chat lock when
+  the id refers to a named conversation; liveness uses `sysinfo`
+  cross-platform; the lock records `lock_holder_started_at` and treats
+  PID/start-time mismatches as stale.
 
 ## Architecture
 
@@ -70,7 +65,7 @@ apps/anatta-cli
                 │
                 ├─ run_new/run_resume → chat/runner.rs
                 │                          │
-                │                          ├─ chat/lock.rs ──► libc::kill (cfg unix)
+                │                          ├─ chat/lock.rs ──► sysinfo (PID + start_time)
                 │                          │      │
                 │                          │      └─► store::conversation
                 │                          │
@@ -126,9 +121,12 @@ CREATE TABLE conversations (
     last_used_at       TEXT NOT NULL,           -- ISO-8601 UTC
     lock_holder_pid    INTEGER                  -- NULL = idle
 );
+
+-- crates/anatta-store/migrations/0004_lock_started_at.sql
+ALTER TABLE conversations ADD COLUMN lock_holder_started_at INTEGER;
 ```
 
-6 columns. No indexes — row count is bounded to dozens.
+7 columns after 0004. No indexes — row count is bounded to dozens.
 
 ### Field justification
 
@@ -136,10 +134,11 @@ CREATE TABLE conversations (
 |---|---|
 | `name` | All subcommands. PK because there is no rename in v1. |
 | `profile_id` | Resume needs backend kind, auth method, provider env (all on `profiles`). FK with `ON DELETE RESTRICT` prevents orphaning. |
-| `backend_session_id` | The pointer used in `--resume` / `exec resume`. NULL on insert; written exactly once after the first turn completes. |
+| `backend_session_id` | The pointer used in `--resume` / `exec resume`. NULL on insert; written exactly once after the first turn completes. Also the reverse-lookup key for `anatta send --resume <id>` to find a matching conversation and acquire its lock. |
 | `cwd` | claude/codex sessions reference relative paths in tool outputs; resuming in a different cwd would be silently wrong. |
 | `last_used_at` | `chat ls` ordering and humanized "5m ago" display. Updated on each turn. |
 | `lock_holder_pid` | Mutual exclusion. NULL = idle. |
+| `lock_holder_started_at` (0004) | Process start time at acquire (Unix epoch seconds). Liveness check compares against current `process_start_time(pid)`; mismatch = PID reused = stale. Reboot-safe. |
 
 ### Fields explicitly cut
 
@@ -147,7 +146,7 @@ CREATE TABLE conversations (
 - `backend` ('claude'/'codex') — derive via JOIN on profiles.
 - `created_at`, `turn_count` — display-only and unused.
 - `lock_holder_hostname` — single-machine v1; add when daemon enters Phase 2.
-- `lock_acquired_at` — staleness uses PID liveness, not timeout.
+- ~~`lock_acquired_at`~~ — superseded by `lock_holder_started_at` added in 0004.
 - All indexes — table cardinality is too small to matter.
 
 ## Multi-turn semantics
@@ -269,26 +268,25 @@ pub async fn try_acquire_with_check<F>(
     pool: &SqlitePool,
     name: &str,
     my_pid: i64,
-    is_alive: F,
+    my_started_at: i64,
+    is_same_alive: F,
 ) -> Result<AcquireOutcome, StoreError>
 where
-    F: FnOnce(i64) -> bool,
+    F: FnOnce(i64, Option<i64>) -> bool,
 {
-    // Use BEGIN IMMEDIATE so this connection takes RESERVED up front;
-    // a concurrent acquire on the same row will see SQLITE_BUSY and the
-    // caller (here) retries via SQLx's built-in busy timeout (set in
-    // store::open). Plain BEGIN would acquire SHARED first and could lose
-    // the SELECT-then-UPDATE race.
+    // BEGIN IMMEDIATE so this connection takes RESERVED up front;
+    // SELECT-then-UPDATE is serialized against concurrent writers.
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
     let row = sqlx::query!(
-        "SELECT lock_holder_pid FROM conversations WHERE name = ?",
-        name
+        "SELECT lock_holder_pid, lock_holder_started_at
+         FROM conversations WHERE name = ?",
+        name,
     ).fetch_one(&mut *conn).await?;
 
     let can_take = match row.lock_holder_pid {
         None => true,
-        Some(pid) => !is_alive(pid),
+        Some(pid) => !is_same_alive(pid, row.lock_holder_started_at),
     };
     if !can_take {
         sqlx::query("ROLLBACK").execute(&mut *conn).await?;
@@ -296,8 +294,10 @@ where
     }
 
     sqlx::query!(
-        "UPDATE conversations SET lock_holder_pid = ? WHERE name = ?",
-        my_pid, name
+        "UPDATE conversations
+           SET lock_holder_pid = ?, lock_holder_started_at = ?
+           WHERE name = ?",
+        my_pid, my_started_at, name,
     ).execute(&mut *conn).await?;
     sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(AcquireOutcome::Acquired)
@@ -357,35 +357,32 @@ WHERE name = ?1 AND lock_holder_pid = ?2;
 A delayed Drop after force-unlock + reacquire by another process becomes a
 no-op (zero rows affected) instead of trampling the new holder.
 
-### PID liveness
+### Liveness check (PID + start_time)
 
-Provided by `libc::kill(pid, 0)` on Unix (`libc` is already a transitive
-dependency via `tokio` / `sqlx`, so zero net new deps):
+Provided cross-platform by `sysinfo`. We compare BOTH the PID and the
+process's start_time (Unix epoch seconds) against what we recorded at
+acquire. A PID reused by an unrelated process has a different start
+time and is correctly treated as stale.
 
 ```rust
-#[cfg(unix)]
-fn pid_alive(pid: i64) -> bool {
-    if pid <= 0 || pid > libc::pid_t::MAX as i64 { return false; }
-    // signal 0: do permission/existence check, do not deliver a signal.
-    // returns 0 on success (process exists and we may signal it),
-    // -1 on failure (errno = ESRCH no such process, EPERM exists but
-    //  we lack permission to signal it — still alive from our POV).
-    let ret = unsafe { libc::kill(pid as libc::pid_t, 0) };
-    if ret == 0 { return true; }
-    let errno = std::io::Error::last_os_error().raw_os_error();
-    errno == Some(libc::EPERM)  // EPERM means "exists, just no perm"
+fn process_start_time(pid: i64) -> Option<i64> {
+    // sysinfo::System::refresh_processes_specifics for a single Pid;
+    // returns None if the process doesn't exist.
+    ...
 }
 
-#[cfg(not(unix))]
-fn pid_alive(_pid: i64) -> bool {
-    // Windows: be conservative — assume alive. User must `chat unlock`.
-    true
+fn is_same_alive(pid: i64, recorded_started_at: Option<i64>) -> bool {
+    let Some(current) = process_start_time(pid) else { return false };
+    match recorded_started_at {
+        Some(rec) => rec == current,           // PID-reuse → mismatch → false
+        None      => true,                     // legacy row (pre-column)
+    }
 }
 ```
 
-One syscall per check, no process-table refresh, no extra crates. Trade-off:
-Windows users lose automatic stale-lock reclaim and must run `chat unlock`
-manually. Documented in non-goals.
+The store-side acquire stores both columns atomically, and the
+liveness callback consults both. `sysinfo` adds ~6 transitive deps but
+gives reboot-safe PID-reuse defense for free across all supported OSes.
 
 ### Failure modes
 
@@ -393,10 +390,10 @@ manually. Documented in non-goals.
 |---|---|
 | Normal exit (`/exit`, Ctrl-D) | `release_now` runs synchronously; lock cleared. |
 | Panic / `?` propagation | Drop fires, spawns detached task, prints warning if it fails. |
-| SIGKILL / power loss | Lock is left set. Next acquire's PID liveness check reclaims it. |
-| Stuck across reboot, PID unused | Same — `pid_alive` returns false, lock reclaimed. |
-| Stuck across reboot, PID **reused** by unrelated live process | `pid_alive` returns true; we falsely treat as held. **Recovery**: `chat unlock <name>`. We do not record process-start time in v1 to disambiguate. |
-| Pathological PID-reuse mid-session (no reboot) | Same as above — `chat unlock`. |
+| SIGKILL / power loss | Lock is left set. Next acquire's liveness check sees the PID is gone → reclaims. |
+| Stuck across reboot, PID unused | Same — `process_start_time` returns None → reclaim. |
+| Stuck across reboot, PID **reused** by unrelated live process | `start_time` differs from recorded → treat as stale → reclaim. |
+| Pathological PID-reuse mid-session (no reboot) | Same — `start_time` differs → reclaim. |
 
 ## CLI surface
 
@@ -740,10 +737,11 @@ spawn_mock to a `mock` feature for v1.
 | Path | Approx LOC | Responsibility |
 |---|---|---|
 | `crates/anatta-store/migrations/0003_conversation.sql` | 15 | DDL for `conversations` table. |
+| `crates/anatta-store/migrations/0004_lock_started_at.sql` | 3 | Adds `lock_holder_started_at INTEGER` column for PID-reuse defense. |
 | `crates/anatta-store/src/conversation.rs` | 200 | `Conversation` struct, CRUD, lock SQL with callback-based liveness. |
 | `apps/anatta-cli/src/chat/mod.rs` | 120 | `ChatCommand`, `run()`, `ChatError`, inline impls of `ls/rm/unlock`. |
 | `apps/anatta-cli/src/chat/runner.rs` | 150 | `run_new`/`run_resume`; main loop body shared via private helper. |
-| `apps/anatta-cli/src/chat/lock.rs` | 80 | `ConversationGuard` (RAII), `pid_alive` (sysinfo). |
+| `apps/anatta-cli/src/chat/lock.rs` | 130 | `ConversationGuard` (RAII), `LockError`, `is_same_alive(pid, recorded_started_at)` via sysinfo. |
 | `apps/anatta-cli/src/chat/input.rs` | 60 | rustyline wrapper, history file path, signal semantics. |
 | `apps/anatta-cli/src/chat/render/mod.rs` | 60 | `EventRenderer` trait, `Palette` + `PALETTE` const, `LineRenderer::new()` factory. |
 | `apps/anatta-cli/src/chat/render/line.rs` | 280 | `LineRenderer`: anchor maps, dispatch, cursor ops, tty detection. |
@@ -767,7 +765,7 @@ spawn_mock to a `mock` feature for v1.
 | `crossterm` | Cursor, style, IsTerminal | ~8 |
 | `termimad` | Markdown → ANSI | ~8 (minimad, lazy-regex, unicode-width, coolor, ...) |
 | `rustyline` | Line editing + history | ~10 |
-| `libc` | `kill(pid, 0)` PID liveness on Unix; already a transitive dep, made direct | 0 net new |
+| `sysinfo` | Cross-platform PID liveness + `start_time()` for PID-reuse defense; `default-features = false`, `features = ["system"]` | ~6 |
 | `insta` (dev) | Snapshot tests | ~12 |
 
 `anatta-runtime` gets a small additive API change (`cancel_mut`). No other
@@ -802,10 +800,9 @@ None blocking implementation. Known residuals:
   `SessionStarted` (and possibly partial UserPrompt) events. Resume from
   this state works (claude/codex accept short histories) but produces a
   visually empty first turn on replay. Documented behavior, not a bug.
-- Non-TTY mode relies on final `ToolUse` events to print the tool line.
-  If a turn is aborted before claude's consolidated `assistant`
-  message_stop fires (rare — error / network drop / SIGKILL on the child
-  before message_stop), tool blocks that only emitted
-  `ToolUseInputDelta` will not appear in the non-TTY log. TTY mode still
-  shows the `⚙ …` placeholder. This is acceptable for v1; pipe consumers
-  see what claude actually finalized.
+- *(closed in v1.1)* Previously, non-TTY mode could drop tool blocks
+  whose final `ToolUse` never arrived. The renderer now tracks
+  `pending_tool_ids` and flushes a `⚙ <unfinalized tool, id=…>`
+  placeholder for every still-pending id when `TurnCompleted` fires
+  (or on chat end). Pipe consumers now always see a line per tool
+  block, finalized or not.
