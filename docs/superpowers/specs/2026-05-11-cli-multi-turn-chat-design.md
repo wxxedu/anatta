@@ -181,13 +181,11 @@ acquire lock (RAII guard, see Lock semantics)
         ├─ spawn::launch → AgentSession (first event already drained,
         │                                so session.session_id() is known)
         │
-        ├─ tokio::select! {
-        │       drain events into renderer,
-        │       Ctrl-C → session.cancel_mut().await; break inner loop
-        │   }
+        ├─ drain loop (see "Cancellation pattern" below — Notify-based
+        │     to avoid simultaneous &mut session borrows in tokio::select!)
         │
         ├─ session.wait().await → ExitInfo            (after natural drain)
-        │   OR cancel_mut path completed              (after Ctrl-C)
+        │   OR cancel_mut().await completed           (after Ctrl-C)
         │
         ├─ if first turn (backend_session_id was NULL):
         │       store.set_backend_session_id(name, sid)
@@ -202,6 +200,45 @@ acquire lock (RAII guard, see Lock semantics)
     │
     └─ guard.release_now() (explicit)  // Drop is fallback only
 ```
+
+### Cancellation pattern
+
+`AgentSession::events()` and `cancel_mut()` both take `&mut self`, so we
+can't hold them simultaneously inside `tokio::select!`. Use an external
+`Notify` set from a detached Ctrl-C task:
+
+```rust
+let cancel = Arc::new(tokio::sync::Notify::new());
+let cancel_in_task = cancel.clone();
+let ctrl_c = tokio::spawn(async move {
+    let _ = tokio::signal::ctrl_c().await;
+    cancel_in_task.notify_one();
+});
+
+let cancelled = loop {
+    tokio::select! {
+        biased;                                  // prefer cancel over recv
+        _ = cancel.notified() => break true,
+        ev = session.events().recv() => match ev {
+            Some(e) => renderer.on_event(&e),
+            None    => break false,              // backend exited naturally
+        }
+    }
+};
+ctrl_c.abort();                                  // release the listener
+
+if cancelled {
+    let exit = session.cancel_mut().await?;
+    renderer.on_turn_end(&exit);
+} else {
+    let exit = session.wait().await?;
+    renderer.on_turn_end(&exit);
+}
+```
+
+The `&mut session` borrows from `events()` and `cancel_mut()` never overlap
+because they live in disjoint code paths after the `select!` resolves.
+`biased;` makes Ctrl-C win ties when both arms are ready.
 
 ### Invariants
 
@@ -237,31 +274,32 @@ pub async fn try_acquire_with_check<F>(
 where
     F: FnOnce(i64) -> bool,
 {
-    // Note: `pool.begin()` issues plain `BEGIN`, which on SQLite acquires
-    // a SHARED lock that upgrades to RESERVED on first write. The two-step
-    // SELECT-then-UPDATE inside this txn can race in theory, but SQLite
-    // serializes writes globally so the worst case is a redundant retry.
-    // For v1 this is acceptable. If needed, swap to a raw
-    // `sqlx::query("BEGIN IMMEDIATE").execute(...)` to take RESERVED up front.
-    let mut tx = pool.begin().await?;
+    // Use BEGIN IMMEDIATE so this connection takes RESERVED up front;
+    // a concurrent acquire on the same row will see SQLITE_BUSY and the
+    // caller (here) retries via SQLx's built-in busy timeout (set in
+    // store::open). Plain BEGIN would acquire SHARED first and could lose
+    // the SELECT-then-UPDATE race.
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
     let row = sqlx::query!(
         "SELECT lock_holder_pid FROM conversations WHERE name = ?",
         name
-    ).fetch_one(&mut *tx).await?;
+    ).fetch_one(&mut *conn).await?;
 
     let can_take = match row.lock_holder_pid {
         None => true,
         Some(pid) => !is_alive(pid),
     };
     if !can_take {
+        sqlx::query("ROLLBACK").execute(&mut *conn).await?;
         return Ok(AcquireOutcome::Held { pid: row.lock_holder_pid.unwrap() });
     }
 
     sqlx::query!(
         "UPDATE conversations SET lock_holder_pid = ? WHERE name = ?",
         my_pid, name
-    ).execute(&mut *tx).await?;
-    tx.commit().await?;
+    ).execute(&mut *conn).await?;
+    sqlx::query("COMMIT").execute(&mut *conn).await?;
     Ok(AcquireOutcome::Acquired)
 }
 ```
@@ -356,8 +394,9 @@ manually. Documented in non-goals.
 | Normal exit (`/exit`, Ctrl-D) | `release_now` runs synchronously; lock cleared. |
 | Panic / `?` propagation | Drop fires, spawns detached task, prints warning if it fails. |
 | SIGKILL / power loss | Lock is left set. Next acquire's PID liveness check reclaims it. |
-| Stuck across reboot (PID reused) | Same — PID liveness sees no matching process. |
-| Pathological PID-reuse collision | `chat unlock` is the manual escape hatch. |
+| Stuck across reboot, PID unused | Same — `pid_alive` returns false, lock reclaimed. |
+| Stuck across reboot, PID **reused** by unrelated live process | `pid_alive` returns true; we falsely treat as held. **Recovery**: `chat unlock <name>`. We do not record process-start time in v1 to disambiguate. |
+| Pathological PID-reuse mid-session (no reboot) | Same as above — `chat unlock`. |
 
 ## CLI surface
 
@@ -388,7 +427,7 @@ anatta chat unlock <name> [--yes]
 | Trigger | Effect |
 |---|---|
 | `/exit`, `/quit`, Ctrl-D | Release lock, exit 0. |
-| Ctrl-C (turn running) | `session.cancel()`, render "(turn cancelled)", continue loop. |
+| Ctrl-C (turn running) | `session.cancel_mut()`, render "(turn cancelled)", continue loop. |
 | Ctrl-C (prompt waiting) | Same as `/exit`. |
 
 No other meta commands. Users wanting `/clear`, `/model`, etc. exit and
@@ -480,8 +519,8 @@ source.
 | `AssistantText { text }` | Find open anchor (lowest unclosed block_index); if found, mark closed (text already painted). If none open, paint markdown at cursor. | Paint markdown at cursor. |
 | `ThinkingDelta { idx, text_so_far }` | Same anchor mechanics, dim grey, `│ ` per line, no markdown. | Skip. |
 | `Thinking { text }` | Same close-only logic as AssistantText. If no anchor open, paint dim grey block. | Paint dim grey block. |
-| `ToolUse { name, input, id }` | Cyan one-line: `⚙ Read(file_path="…", limit=200)`. First 2 object fields, truncate values to 60 chars, " …+N fields" if more. If input not object, `to_string()` truncated to 100. Record `(id → anchor_row, name, finalized=false)` in tool_anchors. | Same, no anchor recording. |
-| `ToolUseInputDelta` | Skip (matches the "minimal" decision; codex never emits it). | Skip. |
+| `ToolUseInputDelta { tool_use_id, .. }` | **First** occurrence per `tool_use_id`: paint placeholder `⚙ …` (cyan, faint) at current cursor; record anchor `(id, row, name=None, finalized=false)` in `tool_anchors`. Subsequent occurrences: no-op (we do not display `partial_json`). This preserves visual ordering on Claude when tool calls are interleaved with text blocks — without this, all tool finals would print after the trailing text. Codex never emits this delta. | Skip. |
+| `ToolUse { name, input, id }` | Cyan one-line: `⚙ Read(file_path="…", limit=200)`. First 2 object fields, truncate values to 60 chars, " …+N fields" if more. If input not object, `to_string()` truncated to 100. If anchor exists for `id` (from a prior placeholder), cursor-move to its row → clear-line → repaint the full rendered line; preserve `row`, set `name`. Else record fresh anchor and paint at cursor. | Same, no anchor / placeholder. |
 | `ToolResult { tool_use_id, success, text, structured }` | Locate anchor for `tool_use_id`. **Summary** = first present of: text head (60 chars), structured one-line JSON head (60 chars), or "(no output)". Backfill on anchor row: ` ✓ <summary>` (green) or ` ✗ <summary>` (red). If text > 200 chars, render dim 4-line preview below + "…(M lines more)". If anchor missing/scrolled-away, print a new line `↩ <name> ✓/✗ <summary>`. Mark anchor `finalized = true`. | Same minus cursor moves: print full one-line tool/result on a single line, no backfill. |
 | `Usage` | Dim: `· 1.2k in · 480 out · $0.0034`. Cost omitted if None. | Same minus dim color. |
 | `TurnCompleted` | For each tool_anchor with `finalized=false`, append ` …` (faint, no result indicator — codex WebSearch/TodoList never emit ToolResult; this is normal). Then render terminal-width separator + blank line. Reset all anchors. | Same minus separator coloring. |
@@ -507,7 +546,7 @@ struct TextAnchor {
 
 struct ToolAnchor {
     row: u16,
-    name: String,
+    name: Option<String>,  // None during placeholder phase (only id known)
     finalized: bool,
 }
 ```
