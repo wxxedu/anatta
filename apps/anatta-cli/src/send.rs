@@ -113,14 +113,30 @@ async fn run_claude(
     record: ProfileRecord,
     cfg: &Config,
 ) -> Result<(), SendError> {
+    let launch = build_claude_launch(&record, prompt, resume, cwd, cfg)?;
+    let session = spawn::launch(launch).await?;
+    let exit = stream_session(session, json).await?;
+    cfg.store.touch_profile(&record.id).await?;
+    enforce_exit("claude", exit)
+}
+
+/// Build a `ClaudeLaunch` from a stored profile + per-call inputs.
+///
+/// Shared by `anatta send` and `anatta chat`. The launch wraps the
+/// profile's CLAUDE_CONFIG_DIR plus a flat env list assembled from the
+/// provider spec + per-row overrides (api-key path) or `None` (login path,
+/// claude-cli reads its own keychain off CLAUDE_CONFIG_DIR).
+pub(crate) fn build_claude_launch(
+    record: &ProfileRecord,
+    prompt: String,
+    resume: Option<String>,
+    cwd: PathBuf,
+    cfg: &Config,
+) -> Result<ClaudeLaunch, SendError> {
     let id = ClaudeProfileId::from_string(record.id.clone())?;
     let profile = ClaudeProfile::open(id, &cfg.anatta_home)?;
     let binary_path = auth::locate_binary("claude").ok_or(SendError::BinaryNotFound("claude"))?;
 
-    // OAuth/login path: provider = None so claude-cli reads its keychain
-    // off CLAUDE_CONFIG_DIR. API-key path: build a flat ProviderEnv that
-    // includes ANTHROPIC_AUTH_TOKEN, the spec's defaults overlaid with the
-    // profile's per-row overrides, plus any vendor-specific extra_env.
     let provider = match record.auth_method {
         AuthMethod::Login => None,
         AuthMethod::ApiKey => {
@@ -141,19 +157,14 @@ async fn run_claude(
         }
     };
 
-    let launch = ClaudeLaunch {
+    Ok(ClaudeLaunch {
         profile,
         cwd,
         prompt,
         resume: resume.map(ClaudeSessionId::new),
         binary_path,
         provider,
-    };
-
-    let session = spawn::launch(launch).await?;
-    let exit = stream_session(session, json).await?;
-    cfg.store.touch_profile(&record.id).await?;
-    enforce_exit("claude", exit)
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -168,13 +179,26 @@ async fn run_codex(
     record: ProfileRecord,
     cfg: &Config,
 ) -> Result<(), SendError> {
+    let launch = build_codex_launch(&record, prompt, resume, cwd, cfg)?;
+    let session = spawn::launch(launch).await?;
+    let exit = stream_session(session, json).await?;
+    cfg.store.touch_profile(&record.id).await?;
+    enforce_exit("codex", exit)
+}
+
+/// Build a `CodexLaunch` from a stored profile + per-call inputs.
+/// Shared by `anatta send` and `anatta chat`.
+pub(crate) fn build_codex_launch(
+    record: &ProfileRecord,
+    prompt: String,
+    resume: Option<String>,
+    cwd: PathBuf,
+    cfg: &Config,
+) -> Result<CodexLaunch, SendError> {
     let id = CodexProfileId::from_string(record.id.clone())?;
     let profile = CodexProfile::open(id, &cfg.anatta_home)?;
     let binary_path = auth::locate_binary("codex").ok_or(SendError::BinaryNotFound("codex"))?;
 
-    // Codex has only the `openai` provider in v1 and no env overrides;
-    // model overrides on the profile row are accepted by the CLI but
-    // not yet wired here (codex-cli has no equivalent env namespace).
     let api_key = match record.auth_method {
         AuthMethod::Login => None,
         AuthMethod::ApiKey => Some(
@@ -183,19 +207,14 @@ async fn run_codex(
         ),
     };
 
-    let launch = CodexLaunch {
+    Ok(CodexLaunch {
         profile,
         cwd,
         prompt,
         resume: resume.map(CodexThreadId::new),
         binary_path,
         api_key,
-    };
-
-    let session = spawn::launch(launch).await?;
-    let exit = stream_session(session, json).await?;
-    cfg.store.touch_profile(&record.id).await?;
-    enforce_exit("codex", exit)
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────

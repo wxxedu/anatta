@@ -20,7 +20,17 @@ anatta-store   = { path = "../../crates/anatta-store" }
 clap        = { version = "4", features = ["derive", "env"] }
 dialoguer   = { version = "0.11", default-features = false, features = ["password"] }
 keyring     = { version = "3", default-features = false, features = ["apple-native", "linux-native", "windows-native"] }
-tokio       = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-std"] }
+tokio       = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-std", "signal", "sync"] }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 chrono      = { workspace = true }
+
+# chat-specific
+crossterm      = "0.29"
+termimad       = "0.31"
+rustyline      = { version = "15", default-features = false, features = ["with-file-history"] }
+libc           = "0.2"
+unicode-width  = "0.2"
+
+[dev-dependencies]
+tempfile    = "3"

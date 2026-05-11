@@ -1,6 +1,7 @@
 //! anatta CLI entry point.
 
 mod auth;
+mod chat;
 mod config;
 mod profile;
 mod send;
@@ -32,6 +33,8 @@ enum Command {
     },
     /// Send a one-shot prompt through a profile and stream the response.
     Send(send::SendArgs),
+    /// Multi-turn chat against a profile (`new`, `resume`, `ls`, `rm`, `unlock`).
+    Chat(chat::ChatArgs),
 }
 
 #[tokio::main]
@@ -45,13 +48,30 @@ async fn main() {
         }
     };
 
-    let result = match cli.command {
-        Command::Profile { action } => profile::run(action, &cfg).await.map_err(|e| e.to_string()),
-        Command::Send(args) => send::run(args, &cfg).await.map_err(|e| e.to_string()),
+    let exit_code = match cli.command {
+        Command::Profile { action } => match profile::run(action, &cfg).await {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("anatta: {e}");
+                1
+            }
+        },
+        Command::Send(args) => match send::run(args, &cfg).await {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("anatta: {e}");
+                1
+            }
+        },
+        Command::Chat(args) => match chat::run(args, &cfg).await {
+            Ok(()) => 0,
+            Err(e) => {
+                if !e.is_silent() {
+                    eprintln!("anatta: {e}");
+                }
+                e.exit_code()
+            }
+        },
     };
-
-    if let Err(msg) = result {
-        eprintln!("anatta: {msg}");
-        std::process::exit(1);
-    }
+    std::process::exit(exit_code);
 }
