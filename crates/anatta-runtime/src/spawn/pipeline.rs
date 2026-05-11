@@ -36,7 +36,13 @@ where
     F: FnMut(&str) -> Vec<AgentEvent> + Send + 'static,
 {
     cmd.kill_on_drop(true);
-    cmd.stdin(std::process::Stdio::piped());
+    // stdin = /dev/null so the child sees immediate EOF. Both claude
+    // (`--print`) and codex (`exec`) receive their prompt via argv; they
+    // do NOT need to read further from stdin. Earlier we used
+    // `Stdio::piped()` which left a never-written-to pipe attached —
+    // codex would read "Reading additional input from stdin..." and
+    // block forever waiting for EOF, hanging every chat turn.
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
