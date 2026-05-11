@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n            SELECT\n                name               AS \"name!\",\n                profile_id         AS \"profile_id!\",\n                backend_session_id,\n                cwd                AS \"cwd!\",\n                last_used_at       AS \"last_used_at!\",\n                lock_holder_pid\n            FROM conversations\n            ORDER BY last_used_at DESC\n            ",
+  "query": "\n            SELECT\n                name               AS \"name!\",\n                profile_id         AS \"profile_id!\",\n                backend_session_id,\n                cwd                AS \"cwd!\",\n                last_used_at       AS \"last_used_at!\",\n                lock_holder_pid,\n                lock_holder_started_at\n            FROM conversations\n            ORDER BY last_used_at DESC\n            ",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,11 @@
         "name": "lock_holder_pid",
         "ordinal": 5,
         "type_info": "Integer"
+      },
+      {
+        "name": "lock_holder_started_at",
+        "ordinal": 6,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
@@ -43,8 +48,9 @@
       true,
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "6fb3458b70e0654371ef95f54fdbff7db469b6de872086ee9727d5a072d078ca"
+  "hash": "dd002f49d495bce1075ea62d2866d81a43bdb06b05f00eab40c2b93640eccae9"
 }

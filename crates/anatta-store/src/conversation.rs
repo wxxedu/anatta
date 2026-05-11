@@ -5,14 +5,14 @@
 //! file at the same time. Acquire is a single SQLite `BEGIN IMMEDIATE`
 //! transaction that:
 //!
-//!   1. SELECTs the current `lock_holder_pid`,
-//!   2. Asks a caller-provided closure whether that PID is still alive,
-//!   3. If NULL or dead → UPDATEs to `my_pid`,
+//!   1. SELECTs the current `(lock_holder_pid, lock_holder_started_at)`,
+//!   2. Asks a caller-provided closure whether that holder is still
+//!      the same live process,
+//!   3. If NULL or dead/reused → UPDATEs to `(my_pid, my_started_at)`,
 //!   4. Else → reports `Held { pid }`.
 //!
-//! Liveness is a CLI-side concern (libc::kill on Unix, conservative on
-//! Windows); this crate accepts a `FnOnce` so it doesn't grow a
-//! process-introspection dependency.
+//! Liveness is a CLI-side concern (sysinfo); this crate accepts a
+//! `FnOnce` so it doesn't grow a process-introspection dependency.
 
 use chrono::{DateTime, Utc};
 
@@ -27,6 +27,7 @@ pub struct ConversationRecord {
     pub cwd: String,
     pub last_used_at: DateTime<Utc>,
     pub lock_holder_pid: Option<i64>,
+    pub lock_holder_started_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ struct ConversationRow {
     cwd: String,
     last_used_at: String,
     lock_holder_pid: Option<i64>,
+    lock_holder_started_at: Option<i64>,
 }
 
 impl ConversationRow {
@@ -64,6 +66,7 @@ impl ConversationRow {
             cwd: self.cwd,
             last_used_at: parse_ts(&self.last_used_at)?,
             lock_holder_pid: self.lock_holder_pid,
+            lock_holder_started_at: self.lock_holder_started_at,
         })
     }
 }
@@ -102,11 +105,40 @@ impl Store {
                 backend_session_id,
                 cwd                AS "cwd!",
                 last_used_at       AS "last_used_at!",
-                lock_holder_pid
+                lock_holder_pid,
+                lock_holder_started_at
             FROM conversations
             WHERE name = ?
             "#,
             name,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(ConversationRow::into_record).transpose()
+    }
+
+    /// Reverse-lookup a conversation by its backend_session_id. Used by
+    /// `anatta send --resume <id>` to optionally pick up the chat lock
+    /// when the id refers to a named conversation.
+    pub async fn get_conversation_by_backend_session_id(
+        &self,
+        backend_session_id: &str,
+    ) -> Result<Option<ConversationRecord>, StoreError> {
+        let row = sqlx::query_as!(
+            ConversationRow,
+            r#"
+            SELECT
+                name               AS "name!",
+                profile_id         AS "profile_id!",
+                backend_session_id,
+                cwd                AS "cwd!",
+                last_used_at       AS "last_used_at!",
+                lock_holder_pid,
+                lock_holder_started_at
+            FROM conversations
+            WHERE backend_session_id = ?
+            "#,
+            backend_session_id,
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -124,7 +156,8 @@ impl Store {
                 backend_session_id,
                 cwd                AS "cwd!",
                 last_used_at       AS "last_used_at!",
-                lock_holder_pid
+                lock_holder_pid,
+                lock_holder_started_at
             FROM conversations
             ORDER BY last_used_at DESC
             "#,
@@ -180,26 +213,32 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically acquire the per-name lock for `my_pid`.
+    /// Atomically acquire the per-name lock for `my_pid` / `my_started_at`.
     ///
     /// Uses `BEGIN IMMEDIATE` so the SELECT-then-UPDATE pair is
     /// serialized against concurrent writers. The caller-provided
-    /// `is_alive` closure decides whether an existing holder PID is
-    /// still alive (libc::kill on Unix, conservative true on Windows).
+    /// `is_same_alive` closure receives the existing holder's
+    /// `(pid, started_at)` and decides whether that exact process is
+    /// still alive (different start time = PID was reused = treat as stale).
     pub async fn try_acquire_with_check<F>(
         &self,
         name: &str,
         my_pid: i64,
-        is_alive: F,
+        my_started_at: i64,
+        is_same_alive: F,
     ) -> Result<AcquireOutcome, StoreError>
     where
-        F: FnOnce(i64) -> bool,
+        F: FnOnce(i64, Option<i64>) -> bool,
     {
         let mut conn = self.pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
         let row = sqlx::query!(
-            "SELECT lock_holder_pid FROM conversations WHERE name = ?",
+            r#"
+            SELECT lock_holder_pid, lock_holder_started_at
+            FROM conversations
+            WHERE name = ?
+            "#,
             name,
         )
         .fetch_optional(&mut *conn)
@@ -215,7 +254,7 @@ impl Store {
 
         let can_take = match row.lock_holder_pid {
             None => true,
-            Some(pid) => !is_alive(pid),
+            Some(pid) => !is_same_alive(pid, row.lock_holder_started_at),
         };
         if !can_take {
             sqlx::query("ROLLBACK").execute(&mut *conn).await?;
@@ -225,8 +264,13 @@ impl Store {
         }
 
         sqlx::query!(
-            "UPDATE conversations SET lock_holder_pid = ? WHERE name = ?",
+            r#"
+            UPDATE conversations
+            SET lock_holder_pid = ?, lock_holder_started_at = ?
+            WHERE name = ?
+            "#,
             my_pid,
+            my_started_at,
             name,
         )
         .execute(&mut *conn)
@@ -236,7 +280,8 @@ impl Store {
     }
 
     /// Release the lock if and only if the caller is still the recorded
-    /// holder. Prevents a delayed Drop from clearing a later acquirer's lock.
+    /// holder. PID alone identifies the row since we wrote both pid +
+    /// started_at atomically; releasing also clears the started_at column.
     pub async fn release_lock_if_held(
         &self,
         name: &str,
@@ -245,7 +290,7 @@ impl Store {
         sqlx::query!(
             r#"
             UPDATE conversations
-            SET lock_holder_pid = NULL
+            SET lock_holder_pid = NULL, lock_holder_started_at = NULL
             WHERE name = ? AND lock_holder_pid = ?
             "#,
             name,
@@ -260,7 +305,11 @@ impl Store {
     /// Clears the lock unconditionally.
     pub async fn force_unlock(&self, name: &str) -> Result<bool, StoreError> {
         let res = sqlx::query!(
-            "UPDATE conversations SET lock_holder_pid = NULL WHERE name = ?",
+            r#"
+            UPDATE conversations
+            SET lock_holder_pid = NULL, lock_holder_started_at = NULL
+            WHERE name = ?
+            "#,
             name,
         )
         .execute(&self.pool)
@@ -356,20 +405,20 @@ mod tests {
         insert(&s, "foo").await;
 
         let r1 = s
-            .try_acquire_with_check("foo", 100, |_| true)
+            .try_acquire_with_check("foo", 100, 7777, |_, _| true)
             .await
             .unwrap();
         assert_eq!(r1, AcquireOutcome::Acquired);
 
         let r2 = s
-            .try_acquire_with_check("foo", 200, |_| true)
+            .try_acquire_with_check("foo", 200, 8888, |_, _| true)
             .await
             .unwrap();
         assert_eq!(r2, AcquireOutcome::Held { pid: 100 });
 
         s.release_lock_if_held("foo", 100).await.unwrap();
         let r3 = s
-            .try_acquire_with_check("foo", 200, |_| true)
+            .try_acquire_with_check("foo", 200, 8888, |_, _| true)
             .await
             .unwrap();
         assert_eq!(r3, AcquireOutcome::Acquired);
@@ -380,30 +429,47 @@ mod tests {
         let s = store_with_profile().await;
         insert(&s, "foo").await;
 
-        s.try_acquire_with_check("foo", 100, |_| true)
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
             .await
             .unwrap();
         // Original holder appears dead → next acquire wins.
         let r = s
-            .try_acquire_with_check("foo", 200, |_| false)
+            .try_acquire_with_check("foo", 200, 8888, |_, _| false)
             .await
             .unwrap();
         assert_eq!(r, AcquireOutcome::Acquired);
-        assert_eq!(
-            s.get_conversation("foo")
-                .await
-                .unwrap()
-                .unwrap()
-                .lock_holder_pid,
-            Some(200),
-        );
+        let row = s.get_conversation("foo").await.unwrap().unwrap();
+        assert_eq!(row.lock_holder_pid, Some(200));
+        assert_eq!(row.lock_holder_started_at, Some(8888));
+    }
+
+    #[tokio::test]
+    async fn pid_reused_treated_as_stale() {
+        // Holder pid 100 was acquired at started_at 7777. Later the OS
+        // reuses pid 100 for a different process at started_at 9999.
+        // The is_same_alive callback sees (pid=100, recorded=Some(7777))
+        // and returns false because the current start time differs.
+        let s = store_with_profile().await;
+        insert(&s, "foo").await;
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
+            .await
+            .unwrap();
+        let r = s
+            .try_acquire_with_check("foo", 200, 8888, |pid, recorded| {
+                assert_eq!(pid, 100);
+                assert_eq!(recorded, Some(7777));
+                false
+            })
+            .await
+            .unwrap();
+        assert_eq!(r, AcquireOutcome::Acquired);
     }
 
     #[tokio::test]
     async fn release_only_clears_for_matching_pid() {
         let s = store_with_profile().await;
         insert(&s, "foo").await;
-        s.try_acquire_with_check("foo", 100, |_| true)
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
             .await
             .unwrap();
         // Wrong PID → no-op.
@@ -422,7 +488,7 @@ mod tests {
     async fn delete_refuses_when_locked() {
         let s = store_with_profile().await;
         insert(&s, "foo").await;
-        s.try_acquire_with_check("foo", 100, |_| true)
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
             .await
             .unwrap();
         assert!(!s.delete_conversation("foo").await.unwrap());
@@ -437,7 +503,7 @@ mod tests {
     async fn force_unlock_clears_unconditionally() {
         let s = store_with_profile().await;
         insert(&s, "foo").await;
-        s.try_acquire_with_check("foo", 100, |_| true)
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
             .await
             .unwrap();
         assert!(s.force_unlock("foo").await.unwrap());
@@ -470,9 +536,53 @@ mod tests {
     async fn acquire_against_missing_conversation_errors() {
         let s = store_with_profile().await;
         let err = s
-            .try_acquire_with_check("ghost", 100, |_| true)
+            .try_acquire_with_check("ghost", 100, 7777, |_, _| true)
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::ConversationNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn release_clears_both_pid_and_started_at() {
+        let s = store_with_profile().await;
+        insert(&s, "foo").await;
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
+            .await
+            .unwrap();
+        s.release_lock_if_held("foo", 100).await.unwrap();
+        let row = s.get_conversation("foo").await.unwrap().unwrap();
+        assert!(row.lock_holder_pid.is_none());
+        assert!(row.lock_holder_started_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn force_unlock_clears_both_columns() {
+        let s = store_with_profile().await;
+        insert(&s, "foo").await;
+        s.try_acquire_with_check("foo", 100, 7777, |_, _| true)
+            .await
+            .unwrap();
+        s.force_unlock("foo").await.unwrap();
+        let row = s.get_conversation("foo").await.unwrap().unwrap();
+        assert!(row.lock_holder_pid.is_none());
+        assert!(row.lock_holder_started_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_by_backend_session_id() {
+        let s = store_with_profile().await;
+        insert(&s, "foo").await;
+        assert!(s
+            .get_conversation_by_backend_session_id("sess-1")
+            .await
+            .unwrap()
+            .is_none());
+        s.set_backend_session_id("foo", "sess-1").await.unwrap();
+        let row = s
+            .get_conversation_by_backend_session_id("sess-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.name, "foo");
     }
 }

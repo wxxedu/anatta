@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT lock_holder_pid, lock_holder_started_at\n            FROM conversations\n            WHERE name = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "lock_holder_pid",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "lock_holder_started_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "b979581a390bbb5c5fd0169a83e8e283c0c4f41b58ece613e939890903fd18bc"
+}
