@@ -10,6 +10,7 @@
 //! content block stream contiguously). `last_delta` tracks the
 //! rewindable region; any other paint commits it.
 
+use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
 
 use anatta_core::{AgentEvent, AgentEventPayload};
@@ -29,6 +30,11 @@ pub(crate) struct LineRenderer {
     skin: MadSkin,
     width: u16,
     last_delta: Option<DeltaAnchor>,
+    /// tool_use_ids that have seen a `ToolUseInputDelta` but no final
+    /// `ToolUse` yet. Flushed on TurnCompleted so non-TTY consumers see
+    /// at least a placeholder when a final never arrives (e.g. turn
+    /// aborted before claude's assistant message_stop).
+    pending_tool_ids: HashSet<String>,
 }
 
 struct DeltaAnchor {
@@ -57,6 +63,7 @@ impl LineRenderer {
             skin: markdown::build_skin(),
             width,
             last_delta: None,
+            pending_tool_ids: HashSet::new(),
         }
     }
 
@@ -65,6 +72,26 @@ impl LineRenderer {
         // content stays on screen; clear our anchor so the next event
         // paints fresh below it.
         self.last_delta = None;
+    }
+
+    /// Emit a placeholder line for each tool_use_id that saw a delta
+    /// but never received a final ToolUse. Called on TurnCompleted /
+    /// chat end. Drained after, so subsequent turns start fresh.
+    fn flush_pending_tools(&mut self) {
+        if self.pending_tool_ids.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = self.pending_tool_ids.drain().collect();
+        for id in ids {
+            let short = if id.len() > 12 { &id[..12] } else { id.as_str() };
+            let line = format!("⚙ <unfinalized tool, id={short}…>");
+            let painted = if self.is_tty {
+                format!("{}\n", color(PALETTE.tool, &line))
+            } else {
+                format!("{line}\n")
+            };
+            self.print(&painted);
+        }
     }
 
     fn rewind_lines(&mut self, lines: u16) -> io::Result<()> {
@@ -318,15 +345,19 @@ impl EventRenderer for LineRenderer {
                 self.handle_final_text(text, DeltaKind::Thinking);
             }
 
-            AgentEventPayload::ToolUse { name, input, .. } => {
+            AgentEventPayload::ToolUse { id, name, input } => {
                 self.commit_delta();
+                self.pending_tool_ids.remove(id);
                 let s = self.render_tool_use(name, input);
                 self.print(&s);
             }
 
-            AgentEventPayload::ToolUseInputDelta { .. } => {
-                // Not rendered in v1. Doing so requires a backfill anchor;
-                // omitted per spec for simplicity.
+            AgentEventPayload::ToolUseInputDelta { tool_use_id, .. } => {
+                // Track that a tool block is in progress. On TurnCompleted
+                // any still-pending ids get a placeholder line — protects
+                // non-TTY logs against aborted turns where the final
+                // ToolUse never arrives.
+                self.pending_tool_ids.insert(tool_use_id.clone());
             }
 
             AgentEventPayload::ToolResult {
@@ -353,6 +384,7 @@ impl EventRenderer for LineRenderer {
 
             AgentEventPayload::TurnCompleted { .. } => {
                 self.commit_delta();
+                self.flush_pending_tools();
                 let s = self.render_separator();
                 self.print(&s);
             }
@@ -380,7 +412,9 @@ impl EventRenderer for LineRenderer {
     }
 
     fn on_chat_end(&mut self) {
-        // ensure cursor reset, no leftover styling
+        // Flush any pending tools from the last in-flight turn so
+        // chat-end without a TurnCompleted still leaves coverage.
+        self.flush_pending_tools();
         if self.is_tty {
             let mut out = io::stdout().lock();
             let _ = queue!(out, ResetColor);

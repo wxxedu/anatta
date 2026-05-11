@@ -16,7 +16,7 @@ use clap::{Args, Subcommand};
 use crate::config::Config;
 
 mod input;
-mod lock;
+pub(crate) mod lock;
 mod render;
 mod runner;
 

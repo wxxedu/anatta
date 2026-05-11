@@ -15,7 +15,7 @@ use anatta_runtime::spawn::{self, AgentSession};
 use tokio::sync::Notify;
 
 use super::input::{InputReader, ReadOutcome};
-use super::lock::ConversationGuard;
+use super::lock::{ConversationGuard, LockError};
 use super::render::line::LineRenderer;
 use super::render::EventRenderer;
 use super::ChatError;
@@ -86,7 +86,14 @@ async fn drive_chat(
     cfg: &Config,
     resumed: bool,
 ) -> Result<(), ChatError> {
-    let guard = ConversationGuard::acquire(&cfg.store, &conv.name).await?;
+    let guard = match ConversationGuard::try_acquire(&cfg.store, &conv.name).await {
+        Ok(g) => g,
+        Err(LockError::Held { pid }) => return Err(ChatError::Locked {
+            name: conv.name.clone(),
+            pid,
+        }),
+        Err(LockError::Store(s)) => return Err(ChatError::Store(s)),
+    };
 
     print_banner(&conv, &profile, resumed);
 
