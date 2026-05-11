@@ -33,7 +33,7 @@ enum Command {
     },
     /// Send a one-shot prompt through a profile and stream the response.
     Send(send::SendArgs),
-    /// Multi-turn chat against a profile (`new`, `resume`, `ls`, `rm`, `unlock`).
+    /// Multi-turn chat against a profile (`new`, `resume`, `ls`, `rm`).
     Chat(chat::ChatArgs),
 }
 

@@ -73,6 +73,4 @@ pub enum StoreError {
     UnknownBackend(String),
     #[error("unknown auth method: {0:?}")]
     UnknownAuthMethod(String),
-    #[error("conversation not found: {0}")]
-    ConversationNotFound(String),
 }

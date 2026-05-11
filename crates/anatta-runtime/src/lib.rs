@@ -25,6 +25,9 @@
 pub mod claude;
 pub mod codex;
 pub mod profile;
+pub mod session_lock;
+
+pub use session_lock::{LockError, SessionLock};
 
 /// Backend subprocess supervision. Gated behind the `spawn` feature so
 /// pure-parser consumers don't pull in `tokio::process` / `tokio::sync`.

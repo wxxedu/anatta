@@ -16,11 +16,11 @@ use anatta_runtime::profile::{
 use anatta_runtime::spawn::{
     self, AgentSession, ClaudeLaunch, ClaudeSessionId, CodexLaunch, CodexThreadId, ExitInfo,
 };
+use anatta_runtime::{LockError, SessionLock};
 use anatta_store::profile::{AuthMethod, BackendKind, ProfileRecord};
 use clap::Args;
 
 use crate::auth;
-use crate::chat::lock::{ConversationGuard, LockError};
 use crate::config::Config;
 
 #[derive(Args, Debug)]
@@ -66,10 +66,9 @@ pub enum SendError {
         stderr_tail: String,
     },
     #[error(
-        "session id matches conversation '{name}' which is in use by pid {pid}\n  \
-         hint: anatta chat unlock {name}"
+        "session id matches conversation '{0}' which is in use by another anatta process"
     )]
-    ConversationLocked { name: String, pid: i64 },
+    ConversationLocked(String),
 
     #[error("auth: {0}")]
     Auth(#[from] auth::AuthError),
@@ -124,9 +123,9 @@ async fn run_claude(
     let session = spawn::launch(launch).await?;
     let exit = stream_session(session, json).await?;
     cfg.store.touch_profile(&record.id).await?;
-    if let Some((name, guard)) = lock {
+    if let Some((name, _lock)) = lock {
         cfg.store.touch_conversation(&name).await?;
-        let _ = guard.release_now().await;
+        // _lock drops here (flock released by OS).
     }
     enforce_exit("claude", exit)
 }
@@ -195,35 +194,31 @@ async fn run_codex(
     let session = spawn::launch(launch).await?;
     let exit = stream_session(session, json).await?;
     cfg.store.touch_profile(&record.id).await?;
-    if let Some((name, guard)) = lock {
+    if let Some((name, _lock)) = lock {
         cfg.store.touch_conversation(&name).await?;
-        let _ = guard.release_now().await;
     }
     enforce_exit("codex", exit)
 }
 
 /// If `--resume <id>` targets a backend_session_id recorded against a
-/// named conversation, acquire its lock so a concurrent `anatta chat
-/// resume` against the same id is blocked. If no matching conversation
+/// named conversation, acquire its [`SessionLock`] so a concurrent
+/// `anatta chat resume` is blocked. If no matching conversation
 /// exists, return None (ad-hoc resume against an arbitrary id is
 /// allowed without coordination).
-async fn maybe_acquire_chat_lock<'a>(
+async fn maybe_acquire_chat_lock(
     resume: Option<&str>,
-    cfg: &'a Config,
-) -> Result<Option<(String, ConversationGuard<'a>)>, SendError> {
+    cfg: &Config,
+) -> Result<Option<(String, SessionLock)>, SendError> {
     let Some(id) = resume else {
         return Ok(None);
     };
     let Some(conv) = cfg.store.get_conversation_by_backend_session_id(id).await? else {
         return Ok(None);
     };
-    match ConversationGuard::try_acquire(&cfg.store, &conv.name).await {
-        Ok(guard) => Ok(Some((conv.name, guard))),
-        Err(LockError::Held { pid }) => Err(SendError::ConversationLocked {
-            name: conv.name,
-            pid,
-        }),
-        Err(LockError::Store(s)) => Err(SendError::Store(s)),
+    match SessionLock::try_acquire(&cfg.anatta_home, &conv.name) {
+        Ok(lock) => Ok(Some((conv.name, lock))),
+        Err(LockError::Held { .. }) => Err(SendError::ConversationLocked(conv.name)),
+        Err(LockError::Io(io)) => Err(SendError::Io(io)),
     }
 }
 

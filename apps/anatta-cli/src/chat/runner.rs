@@ -26,12 +26,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anatta_runtime::spawn::{self, AgentSession, PersistentCodexSession, TurnHandle};
+use anatta_runtime::{LockError, SessionLock};
 use anatta_store::conversation::{ConversationRecord, NewConversation};
 use anatta_store::profile::{BackendKind, ProfileRecord};
 use tokio::sync::Notify;
 
 use super::input::{InputReader, ReadOutcome};
-use super::lock::{ConversationGuard, LockError};
 use super::render::line::LineRenderer;
 use super::render::EventRenderer;
 use super::ChatError;
@@ -103,15 +103,12 @@ async fn drive_chat(
     cfg: &Config,
     resumed: bool,
 ) -> Result<(), ChatError> {
-    let guard = match ConversationGuard::try_acquire(&cfg.store, &conv.name).await {
-        Ok(g) => g,
-        Err(LockError::Held { pid }) => {
-            return Err(ChatError::Locked {
-                name: conv.name.clone(),
-                pid,
-            });
+    let _lock = match SessionLock::try_acquire(&cfg.anatta_home, &conv.name) {
+        Ok(l) => l,
+        Err(LockError::Held { .. }) => {
+            return Err(ChatError::Locked(conv.name.clone()));
         }
-        Err(LockError::Store(s)) => return Err(ChatError::Store(s)),
+        Err(LockError::Io(io)) => return Err(ChatError::Io(io)),
     };
 
     print_banner(&conv, &profile, resumed);
@@ -130,7 +127,7 @@ async fn drive_chat(
 
     renderer.on_chat_end();
     input.save_history();
-    let _ = guard.release_now().await;
+    // _lock drops here — the OS releases the flock automatically.
     result
 }
 

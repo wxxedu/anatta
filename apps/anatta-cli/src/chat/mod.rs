@@ -5,18 +5,22 @@
 //!     conversation
 //!   * `resume <name>` — continue an existing conversation
 //!   * `ls` — list conversations
-//!   * `rm <name>` — delete a conversation row (refuses if locked)
-//!   * `unlock <name> [--yes]` — force-clear the lock
+//!   * `rm <name>` — delete a conversation row (refuses if in use)
+//!
+//! There is no `unlock` command: the per-conversation lock lives in
+//! `anatta-runtime`'s [`SessionLock`](anatta_runtime::SessionLock),
+//! which the OS releases automatically when the holding process
+//! exits — stale-lock recovery is not a thing.
 
 use std::path::PathBuf;
 
+use anatta_runtime::SessionLock;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 
 use crate::config::Config;
 
 mod input;
-pub(crate) mod lock;
 mod render;
 mod runner;
 
@@ -46,18 +50,10 @@ pub enum ChatCommand {
     },
     /// List conversations.
     Ls,
-    /// Delete a conversation (refuses if locked).
+    /// Delete a conversation (refuses if in use).
     Rm {
         /// Conversation name.
         name: String,
-    },
-    /// Forcibly clear the lock for a conversation.
-    Unlock {
-        /// Conversation name.
-        name: String,
-        /// Skip the confirmation prompt.
-        #[arg(long)]
-        yes: bool,
     },
 }
 
@@ -67,8 +63,8 @@ pub enum ChatError {
     NotFound(String),
     #[error("conversation '{0}' already exists")]
     AlreadyExists(String),
-    #[error("conversation '{name}' is in use by pid {pid}\n  hint: anatta chat unlock {name}")]
-    Locked { name: String, pid: i64 },
+    #[error("conversation '{0}' is in use by another anatta process")]
+    Locked(String),
     #[error("profile not found: {0}")]
     ProfileNotFound(String),
 
@@ -84,6 +80,8 @@ pub enum ChatError {
     #[error(transparent)]
     Spawn(#[from] anatta_runtime::spawn::SpawnError),
     #[error(transparent)]
+    Lock(#[from] anatta_runtime::LockError),
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("readline: {0}")]
     Readline(String),
@@ -96,7 +94,7 @@ impl ChatError {
             ChatError::InputClosed => 0,
             ChatError::NotFound(_)
             | ChatError::AlreadyExists(_)
-            | ChatError::Locked { .. }
+            | ChatError::Locked(_)
             | ChatError::ProfileNotFound(_) => 2,
             _ => 1,
         }
@@ -118,7 +116,6 @@ pub async fn run(args: ChatArgs, cfg: &Config) -> Result<(), ChatError> {
         ChatCommand::Resume { name } => runner::run_resume(name, cfg).await,
         ChatCommand::Ls => run_ls(cfg).await,
         ChatCommand::Rm { name } => run_rm(name, cfg).await,
-        ChatCommand::Unlock { name, yes } => run_unlock(name, yes, cfg).await,
     }
 }
 
@@ -131,9 +128,10 @@ async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
     let now = Utc::now();
     println!("{:<20} {:<22} {:<14} {}", "NAME", "PROFILE", "LAST USED", "STATUS");
     for row in rows {
-        let status = match row.lock_holder_pid {
-            None => "idle".to_owned(),
-            Some(pid) => format!("🔒 pid {pid}"),
+        let status = if SessionLock::is_held(&cfg.anatta_home, &row.name) {
+            "🔒 in use".to_owned()
+        } else {
+            "idle".to_owned()
         };
         let last = humanize_ago(now, row.last_used_at);
         println!(
@@ -148,55 +146,24 @@ async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
 }
 
 async fn run_rm(name: String, cfg: &Config) -> Result<(), ChatError> {
-    let row = cfg.store.get_conversation(&name).await?;
-    let row = row.ok_or_else(|| ChatError::NotFound(name.clone()))?;
-    if let Some(pid) = row.lock_holder_pid {
-        return Err(ChatError::Locked {
-            name: name.clone(),
-            pid,
-        });
+    // Existence check first so the error message is precise.
+    if cfg.store.get_conversation(&name).await?.is_none() {
+        return Err(ChatError::NotFound(name));
     }
+    // Hold the SessionLock briefly: if we can't acquire it, someone
+    // else is using the conversation right now. If we can, delete the
+    // row and let the lock drop (the lockfile is left behind; it's
+    // harmless and will be re-bound the next time someone with the
+    // same name acquires).
+    let _lock = SessionLock::try_acquire(&cfg.anatta_home, &name).map_err(|e| match e {
+        anatta_runtime::LockError::Held { .. } => ChatError::Locked(name.clone()),
+        anatta_runtime::LockError::Io(io) => ChatError::Io(io),
+    })?;
     let deleted = cfg.store.delete_conversation(&name).await?;
     if !deleted {
         return Err(ChatError::NotFound(name));
     }
     eprintln!("removed conversation '{name}'");
-    Ok(())
-}
-
-async fn run_unlock(name: String, yes: bool, cfg: &Config) -> Result<(), ChatError> {
-    let row = cfg
-        .store
-        .get_conversation(&name)
-        .await?
-        .ok_or_else(|| ChatError::NotFound(name.clone()))?;
-    let pid_msg = match row.lock_holder_pid {
-        None => {
-            eprintln!("conversation '{name}' is already idle");
-            return Ok(());
-        }
-        Some(pid) => pid,
-    };
-    if !yes {
-        eprintln!(
-            "warning: forcibly clearing lock for '{name}' (was held by pid {pid_msg}).\n         \
-            if another anatta chat is still running, the underlying session\n         \
-            file may be corrupted by concurrent writes. proceed? [y/N]"
-        );
-        let mut answer = String::new();
-        std::io::stdin().read_line(&mut answer)?;
-        let answer = answer.trim().to_lowercase();
-        if answer != "y" && answer != "yes" {
-            eprintln!("aborted");
-            return Ok(());
-        }
-    }
-    let cleared = cfg.store.force_unlock(&name).await?;
-    if cleared {
-        eprintln!("lock for '{name}' cleared");
-    } else {
-        eprintln!("no change");
-    }
     Ok(())
 }
 
@@ -229,4 +196,3 @@ fn truncate_for_col(s: &str, max: usize) -> String {
         format!("{head}…")
     }
 }
-
