@@ -148,7 +148,7 @@ async fn run_chat_claude(
     // Read the keychain ONCE for the whole chat session. macOS
     // prompts on every keychain access, so calling `resolve_api_key`
     // per turn would pop a password dialog on every prompt we send.
-    let api_key = send::resolve_api_key(profile)?;
+    let api_key = send::resolve_api_key(profile, cfg)?;
 
     loop {
         match input.read_prompt() {
@@ -227,7 +227,7 @@ async fn run_chat_codex(
     // for the whole chat, so a single keychain read would have been
     // sufficient anyway — passing the resolved value here matches
     // claude's per-turn pattern.)
-    let api_key = send::resolve_api_key(profile)?;
+    let api_key = send::resolve_api_key(profile, cfg)?;
 
     // The CodexLaunch wants a `prompt` field, but for the persistent
     // open path we don't send a prompt yet (each turn supplies its

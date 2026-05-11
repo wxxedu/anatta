@@ -336,10 +336,18 @@ async fn create(
     );
 
     // 8. run auth (with rollback on failure)
-    let outcome = run_auth(backend, &profile_path, &id_string, auth_method, api_key.as_deref()).await;
+    let outcome = run_auth(
+        backend,
+        &profile_path,
+        &id_string,
+        auth_method,
+        api_key.as_deref(),
+        cfg,
+    )
+    .await;
     if let Err(e) = outcome {
         let _ = std::fs::remove_dir_all(&profile_path);
-        let _ = auth::delete_api_key(&id_string);
+        let _ = auth::delete_api_key(&cfg.anatta_home, &id_string);
         return Err(ProfileCmdError::RolledBack {
             source: Box::new(e),
         });
@@ -365,7 +373,7 @@ async fn create(
         .await
     {
         let _ = std::fs::remove_dir_all(&profile_path);
-        let _ = auth::delete_api_key(&id_string);
+        let _ = auth::delete_api_key(&cfg.anatta_home, &id_string);
         return Err(e.into());
     }
 
@@ -379,6 +387,7 @@ async fn run_auth(
     profile_id: &str,
     method: AuthMethod,
     api_key: Option<&str>,
+    cfg: &Config,
 ) -> Result<(), ProfileCmdError> {
     match method {
         AuthMethod::Login => {
@@ -394,7 +403,7 @@ async fn run_auth(
         }
         AuthMethod::ApiKey => {
             let key = api_key.expect("api_key path always supplies the key");
-            auth::store_api_key(profile_id, key)?;
+            auth::store_api_key(&cfg.anatta_home, profile_id, key)?;
             Ok(())
         }
     }
@@ -477,11 +486,11 @@ async fn show(cfg: &Config, id: &str) -> Result<(), ProfileCmdError> {
     }
 
     if matches!(r.auth_method, AuthMethod::ApiKey) {
-        let has = auth::read_api_key(&r.id)?.is_some();
+        let has = auth::read_api_key(&cfg.anatta_home, &r.id)?.is_some();
         println!(
             "{:<22} {}",
             "api_key:",
-            if has { "(in keyring)" } else { "(missing)" }
+            if has { "(stored)" } else { "(missing)" }
         );
     }
     Ok(())
@@ -497,7 +506,7 @@ async fn delete(cfg: &Config, id: &str, yes: bool) -> Result<(), ProfileCmdError
     if !yes {
         let confirm = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt(format!(
-                "Delete profile {} ({} / \"{}\")? Profile dir, keyring entry, and DB row are removed; shared session files are kept.",
+                "Delete profile {} ({} / \"{}\")? Profile dir, credentials file, and DB row are removed; shared session files are kept.",
                 row.id,
                 row.backend.as_str(),
                 row.name
@@ -510,11 +519,12 @@ async fn delete(cfg: &Config, id: &str, yes: bool) -> Result<(), ProfileCmdError
         }
     }
 
+    // Removing the profile dir wipes the credentials file alongside
+    // claude/codex's own state — single recursive rm covers both.
     let dir = cfg.anatta_home.join("profiles").join(&row.id);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(ProfileCmdError::Io)?;
     }
-    let _ = auth::delete_api_key(&row.id);
     cfg.store.delete_profile(&row.id).await?;
 
     println!("✓ {} deleted.", row.id);

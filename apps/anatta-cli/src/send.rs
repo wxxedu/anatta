@@ -119,7 +119,7 @@ async fn run_claude(
     cfg: &Config,
 ) -> Result<(), SendError> {
     let lock = maybe_acquire_chat_lock(resume.as_deref(), cfg).await?;
-    let api_key = resolve_api_key(&record)?;
+    let api_key = resolve_api_key(&record, cfg)?;
     let launch = build_claude_launch(&record, api_key, prompt, resume, cwd, cfg)?;
     let session = spawn::launch(launch).await?;
     let exit = stream_session(session, json).await?;
@@ -191,11 +191,14 @@ pub(crate) fn build_claude_launch(
 /// **Callers that build many launches against the same profile must
 /// cache this value** — every call triggers a keychain access which on
 /// macOS can prompt the user for a password.
-pub(crate) fn resolve_api_key(record: &ProfileRecord) -> Result<Option<String>, SendError> {
+pub(crate) fn resolve_api_key(
+    record: &ProfileRecord,
+    cfg: &Config,
+) -> Result<Option<String>, SendError> {
     match record.auth_method {
         AuthMethod::Login => Ok(None),
         AuthMethod::ApiKey => Ok(Some(
-            auth::read_api_key(&record.id)?
+            auth::read_api_key(&cfg.anatta_home, &record.id)?
                 .ok_or_else(|| SendError::ApiKeyMissing(record.id.clone()))?,
         )),
     }
@@ -214,7 +217,7 @@ async fn run_codex(
     cfg: &Config,
 ) -> Result<(), SendError> {
     let lock = maybe_acquire_chat_lock(resume.as_deref(), cfg).await?;
-    let api_key = resolve_api_key(&record)?;
+    let api_key = resolve_api_key(&record, cfg)?;
     let launch = build_codex_launch(&record, api_key, prompt, resume, cwd, cfg)?;
     let session = spawn::launch(launch).await?;
     let exit = stream_session(session, json).await?;
