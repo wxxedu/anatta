@@ -23,6 +23,12 @@ pub(crate) trait EventRenderer {
     /// delta state.
     fn on_turn_end(&mut self);
 
+    /// Called right before the chat loop reads the next prompt. Lets
+    /// renderers print a sticky status line (rate-limit summary, etc.)
+    /// above the `>` prompt without cluttering the inline transcript
+    /// while a turn is streaming.
+    fn pre_prompt(&mut self);
+
     /// Called once before the chat loop returns. Last chance to flush
     /// state, render a goodbye line, etc.
     fn on_chat_end(&mut self);

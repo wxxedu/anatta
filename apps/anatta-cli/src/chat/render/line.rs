@@ -10,7 +10,7 @@
 //! content block stream contiguously). `last_delta` tracks the
 //! rewindable region; any other paint commits it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, IsTerminal, Write};
 
 use anatta_core::{AgentEvent, AgentEventPayload};
@@ -34,6 +34,19 @@ pub(crate) struct LineRenderer {
     /// at least a placeholder when a final never arrives (e.g. turn
     /// aborted before claude's assistant message_stop).
     pending_tool_ids: HashSet<String>,
+    /// Latest rate-limit state per `limit_kind` (claude: "five_hour" /
+    /// "seven_day"; codex: "primary" / "secondary"). Drives both the
+    /// pre-prompt status line and the "alert on status transition"
+    /// inline behavior — without this we'd repeat the same banner on
+    /// every codex `TokenCount` tick.
+    rate_limit_state: HashMap<String, RateLimitTrack>,
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitTrack {
+    used_percent: Option<f64>,
+    status: Option<String>,
+    resets_at: Option<i64>,
 }
 
 struct DeltaAnchor {
@@ -63,6 +76,7 @@ impl LineRenderer {
             width,
             last_delta: None,
             pending_tool_ids: HashSet::new(),
+            rate_limit_state: HashMap::new(),
         }
     }
 
@@ -278,19 +292,114 @@ impl LineRenderer {
         }
     }
 
-    fn render_rate_limit(&self, kind: &str, resets_at: Option<i64>) -> String {
-        let when = match resets_at {
+    /// One-line alert printed inline when a rate-limit window
+    /// transitions into warning or rejected. Sparse by construction —
+    /// see `on_rate_limit_event` below.
+    fn render_rate_limit_alert(&self, kind: &str, track: &RateLimitTrack) -> String {
+        let pct = track
+            .used_percent
+            .map(|p| format!(" · {p:.0}% used"))
+            .unwrap_or_default();
+        let when = match track.resets_at {
             Some(ts) => chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
                 .map(|d| d.to_rfc3339())
                 .unwrap_or_else(|| ts.to_string()),
             None => "unknown".into(),
         };
-        let line = format!("⚠ rate limit ({kind}) — resets at {when}");
+        let glyph = match track.status.as_deref() {
+            Some("rejected") => "🛑",
+            _ => "⚠",
+        };
+        let line = format!("{glyph} rate limit ({kind}){pct} — resets at {when}");
+        let palette = match track.status.as_deref() {
+            Some("rejected") => PALETTE.error,
+            _ => PALETTE.rate_limit,
+        };
         if self.is_tty {
-            format!("{}\n", color(PALETTE.rate_limit, &line))
+            format!("{}\n", color(palette, &line))
         } else {
             format!("{line}\n")
         }
+    }
+
+    /// One compact line printed above each `>` prompt summarising all
+    /// known rate-limit windows. Returns `None` if no window is worth
+    /// surfacing (everything `ok` and under 50%) — keeps the prompt
+    /// uncluttered when usage is light.
+    fn render_rate_limit_status_line(&self) -> Option<String> {
+        if self.rate_limit_state.is_empty() {
+            return None;
+        }
+        let worth_showing = self.rate_limit_state.values().any(|t| {
+            t.status.as_deref().is_some_and(|s| s != "ok")
+                || t.used_percent.is_some_and(|p| p >= 50.0)
+        });
+        if !worth_showing {
+            return None;
+        }
+        let mut kinds: Vec<&String> = self.rate_limit_state.keys().collect();
+        kinds.sort();
+        let parts: Vec<String> = kinds
+            .iter()
+            .map(|k| format_status_window(k, &self.rate_limit_state[*k]))
+            .collect();
+        let line = parts.join(" · ");
+        // Worst status across windows picks the color: rejected → error,
+        // any non-ok → rate_limit, else dim usage.
+        let any_rejected = self
+            .rate_limit_state
+            .values()
+            .any(|t| t.status.as_deref() == Some("rejected"));
+        let any_warning = self
+            .rate_limit_state
+            .values()
+            .any(|t| t.status.as_deref().is_some_and(|s| s != "ok"));
+        let palette = if any_rejected {
+            PALETTE.error
+        } else if any_warning {
+            PALETTE.rate_limit
+        } else {
+            PALETTE.usage
+        };
+        Some(if self.is_tty {
+            format!("{}\n", color(palette, &line))
+        } else {
+            format!("{line}\n")
+        })
+    }
+
+    /// Update rate-limit state and emit an inline alert *only* on
+    /// status transitions into warning/rejected. Steady-state ticks
+    /// (codex `TokenCount` fires once per turn even when nothing
+    /// changes) are absorbed silently — they still update the
+    /// percentage shown in the pre-prompt status line.
+    fn on_rate_limit_event(
+        &mut self,
+        kind: &str,
+        used_percent: Option<f64>,
+        status: Option<String>,
+        resets_at: Option<i64>,
+    ) {
+        let new_track = RateLimitTrack {
+            used_percent,
+            status: status.clone(),
+            resets_at,
+        };
+        let prev_status = self
+            .rate_limit_state
+            .get(kind)
+            .and_then(|t| t.status.clone());
+        let crossed_into_concerning = match (&prev_status, &status) {
+            (_, Some(s)) if s == "ok" => false,
+            (Some(prev), Some(cur)) if prev == cur => false,
+            (_, Some(_)) => true,
+            (_, None) => false,
+        };
+        if crossed_into_concerning {
+            let s = self.render_rate_limit_alert(kind, &new_track);
+            self.print(&s);
+        }
+        self.rate_limit_state.insert(kind.to_owned(), new_track);
     }
 
     fn render_error(&self, message: &str, fatal: bool) -> String {
@@ -390,12 +499,18 @@ impl EventRenderer for LineRenderer {
 
             AgentEventPayload::RateLimit {
                 limit_kind,
+                used_percent,
+                status,
                 resets_at,
                 ..
             } => {
                 self.commit_delta();
-                let s = self.render_rate_limit(limit_kind, *resets_at);
-                self.print(&s);
+                self.on_rate_limit_event(
+                    limit_kind,
+                    *used_percent,
+                    status.clone(),
+                    *resets_at,
+                );
             }
 
             AgentEventPayload::Error { message, fatal } => {
@@ -408,6 +523,12 @@ impl EventRenderer for LineRenderer {
 
     fn on_turn_end(&mut self) {
         self.commit_delta();
+    }
+
+    fn pre_prompt(&mut self) {
+        if let Some(s) = self.render_rate_limit_status_line() {
+            self.print(&s);
+        }
     }
 
     fn on_chat_end(&mut self) {
@@ -488,6 +609,44 @@ fn result_summary(text: Option<&str>, structured: Option<&Value>) -> String {
     }
 }
 
+/// Compact per-window cell used in the pre-prompt status line, e.g.
+/// `seven_day 87% · resets in 6h`. Falls back gracefully when fields
+/// are missing (e.g. claude `rate_limit_event` without `utilization`).
+fn format_status_window(kind: &str, track: &RateLimitTrack) -> String {
+    let pct = match track.used_percent {
+        Some(p) => format!(" {p:.0}%"),
+        None => String::new(),
+    };
+    let resets = match track.resets_at {
+        Some(ts) => format!(
+            " · resets {}",
+            humanize_resets_in(ts, chrono::Utc::now().timestamp()),
+        ),
+        None => String::new(),
+    };
+    format!("{kind}{pct}{resets}")
+}
+
+/// Render `resets_at` as a relative duration ("in 6h", "in 25m") if it
+/// is in the future; fall back to the absolute RFC3339 timestamp
+/// otherwise. The relative form is what users actually need ("how long
+/// until I'm unblocked"); the absolute form is the safety net.
+fn humanize_resets_in(resets_at_ts: i64, now_ts: i64) -> String {
+    let secs = resets_at_ts.saturating_sub(now_ts);
+    if secs <= 0 {
+        return "now".into();
+    }
+    if secs < 60 {
+        format!("in {secs}s")
+    } else if secs < 3600 {
+        format!("in {}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("in {}h", secs / 3600)
+    } else {
+        format!("in {}d", secs / 86_400)
+    }
+}
+
 fn humanize_tokens(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
@@ -551,6 +710,37 @@ mod tests {
         assert_eq!(humanize_tokens(50), "50");
         assert_eq!(humanize_tokens(1_500), "1.5k");
         assert_eq!(humanize_tokens(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn status_line_hidden_for_low_usage() {
+        let mut r = LineRenderer::new();
+        r.on_rate_limit_event("primary", Some(20.0), Some("ok".into()), None);
+        assert!(r.render_rate_limit_status_line().is_none());
+    }
+
+    #[test]
+    fn status_line_shown_when_threshold_crossed() {
+        let mut r = LineRenderer::new();
+        r.on_rate_limit_event("primary", Some(75.0), Some("ok".into()), None);
+        let line = r.render_rate_limit_status_line().expect("status line");
+        assert!(line.contains("primary"));
+        assert!(line.contains("75%"));
+    }
+
+    #[test]
+    fn status_line_shown_when_status_non_ok_even_if_low_percent() {
+        let mut r = LineRenderer::new();
+        r.on_rate_limit_event("five_hour", Some(10.0), Some("warning".into()), None);
+        assert!(r.render_rate_limit_status_line().is_some());
+    }
+
+    #[test]
+    fn humanize_resets_in_picks_unit() {
+        assert_eq!(humanize_resets_in(100, 50), "in 50s");
+        assert_eq!(humanize_resets_in(3000, 0), "in 50m");
+        assert_eq!(humanize_resets_in(7200, 0), "in 2h");
+        assert_eq!(humanize_resets_in(0, 100), "now");
     }
 
     #[test]

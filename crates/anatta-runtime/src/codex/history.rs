@@ -251,7 +251,8 @@ pub struct InputImage {
 pub enum EventMsg {
     TokenCount {
         info: Value,
-        rate_limits: Value,
+        #[serde(default)]
+        rate_limits: Option<RateLimitSnapshot>,
     },
     AgentReasoning {
         text: String,
@@ -401,6 +402,43 @@ pub enum EventMsg {
         #[serde(default)]
         agent_statuses: Option<Value>,
     },
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// rate limits (carried by TokenCount + the app-server's
+// `account/rateLimits/updated` notification)
+//
+// Upstream: codex/protocol/src/protocol.rs (`RateLimitSnapshot`).
+// We model only the fields anatta projects; other fields (credits,
+// plan_type, limit_id) are intentionally ignored by serde — the
+// snapshot grows over time and we don't want to fail-closed on new
+// fields.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RateLimitSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<RateLimitWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<RateLimitWindow>,
+    /// `None` while under the limit; `Some(_)` once exhausted. We don't
+    /// distinguish the reached-type subspecies (credits-depleted vs
+    /// usage-limit-reached etc.) — for anatta's purposes "hit" is
+    /// what matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reached_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RateLimitWindow {
+    /// 0–100. Required upstream (no default).
+    pub used_percent: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<i64>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -616,7 +654,32 @@ mod tests {
         let line = r#"{"type":"event_msg","timestamp":"t","payload":{"type":"token_count","info":{},"rate_limits":{}}}"#;
         let ev = parse(line);
         match ev.kind {
-            CodexEventKind::EventMsg(EventMsg::TokenCount { .. }) => {}
+            CodexEventKind::EventMsg(EventMsg::TokenCount { rate_limits, .. }) => {
+                // Empty `{}` deserializes into a snapshot with all
+                // fields None — none of the fields are required.
+                let snap = rate_limits.expect("rate_limits present");
+                assert!(snap.primary.is_none());
+                assert!(snap.secondary.is_none());
+                assert!(snap.rate_limit_reached_type.is_none());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_event_msg_token_count_with_populated_rate_limits() {
+        let line = r#"{"type":"event_msg","timestamp":"t","payload":{"type":"token_count","info":{},"rate_limits":{"primary":{"used_percent":42.5,"window_minutes":300,"resets_at":1778414400},"secondary":{"used_percent":12.0},"rate_limit_reached_type":null}}}"#;
+        let ev = parse(line);
+        match ev.kind {
+            CodexEventKind::EventMsg(EventMsg::TokenCount { rate_limits, .. }) => {
+                let snap = rate_limits.expect("rate_limits present");
+                let p = snap.primary.expect("primary window");
+                assert!((p.used_percent - 42.5).abs() < 1e-9);
+                assert_eq!(p.resets_at, Some(1778414400));
+                let s = snap.secondary.expect("secondary window");
+                assert!((s.used_percent - 12.0).abs() < 1e-9);
+                assert!(snap.rate_limit_reached_type.is_none());
+            }
             other => panic!("wrong variant: {other:?}"),
         }
     }

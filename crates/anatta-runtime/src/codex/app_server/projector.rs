@@ -79,6 +79,8 @@ impl AppServerProjector {
 
             "thread/tokenUsage/updated" => self.project_token_usage(params, now),
 
+            "account/rateLimits/updated" => self.project_rate_limits(params, now),
+
             "turn/completed" => self.project_turn_completed(params, now),
 
             "error" => self.project_error(params, now, /* fatal default */ true),
@@ -99,7 +101,6 @@ impl AppServerProjector {
             | "mcpServer/startupStatus/updated"
             | "mcpServer/oauthLogin/completed"
             | "account/updated"
-            | "account/rateLimits/updated"
             | "account/login/completed"
             | "model/rerouted"
             | "model/verification"
@@ -381,6 +382,29 @@ impl AppServerProjector {
             }
             _ => Vec::new(),
         }
+    }
+
+    fn project_rate_limits(&mut self, params: &Value, now: DateTime<Utc>) -> Vec<AgentEvent> {
+        // `account/rateLimits/updated` shape: { rateLimits: RateLimitSnapshot }
+        // (camelCase top-level wrapper, snake_case inside the snapshot —
+        // matches the codex app-server's general "v2 outer / wire-inner"
+        // convention).
+        let Some(raw) = params.get("rateLimits") else {
+            return Vec::new();
+        };
+        let snap: super::super::history::RateLimitSnapshot =
+            match serde_json::from_value(raw.clone()) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            };
+        let envelope = AgentEventEnvelope {
+            session_id: self.thread_id.clone(),
+            timestamp: now,
+            backend: Backend::Codex,
+            raw_uuid: None,
+            parent_tool_use_id: None,
+        };
+        super::super::projector::rate_limit_events_from_snapshot(&envelope, &snap)
     }
 
     fn project_token_usage(&mut self, params: &Value, now: DateTime<Utc>) -> Vec<AgentEvent> {
@@ -676,6 +700,67 @@ mod tests {
                 assert_eq!(*cache_read, 50);
             }
             _ => panic!("expected Usage"),
+        }
+    }
+
+    #[test]
+    fn account_rate_limits_updated_emits_per_window_events() {
+        let mut p = AppServerProjector::new("t1".into());
+        let evts = run(
+            &mut p,
+            "account/rateLimits/updated",
+            json!({
+                "rateLimits": {
+                    "primary": { "used_percent": 88.5, "resets_at": 1778414400 },
+                    "secondary": { "used_percent": 20.0 },
+                    "rate_limit_reached_type": null
+                }
+            }),
+        );
+        assert_eq!(evts.len(), 2);
+        match &evts[0] {
+            AgentEventPayload::RateLimit {
+                limit_kind,
+                used_percent,
+                status,
+                resets_at,
+                ..
+            } => {
+                assert_eq!(limit_kind, "primary");
+                assert!((used_percent.unwrap() - 88.5).abs() < 1e-9);
+                assert_eq!(status.as_deref(), Some("ok"));
+                assert_eq!(resets_at, &Some(1778414400));
+            }
+            _ => panic!("expected primary RateLimit"),
+        }
+        match &evts[1] {
+            AgentEventPayload::RateLimit { limit_kind, used_percent, .. } => {
+                assert_eq!(limit_kind, "secondary");
+                assert!((used_percent.unwrap() - 20.0).abs() < 1e-9);
+            }
+            _ => panic!("expected secondary RateLimit"),
+        }
+    }
+
+    #[test]
+    fn account_rate_limits_updated_rejected_when_reached() {
+        let mut p = AppServerProjector::new("t1".into());
+        let evts = run(
+            &mut p,
+            "account/rateLimits/updated",
+            json!({
+                "rateLimits": {
+                    "primary": { "used_percent": 100.0 },
+                    "rate_limit_reached_type": "rate_limit_reached"
+                }
+            }),
+        );
+        assert_eq!(evts.len(), 1);
+        match &evts[0] {
+            AgentEventPayload::RateLimit { status, .. } => {
+                assert_eq!(status.as_deref(), Some("rejected"));
+            }
+            _ => panic!("expected RateLimit"),
         }
     }
 

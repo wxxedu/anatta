@@ -186,7 +186,18 @@ fn render_pretty(ev: &AgentEvent) {
                 None => eprintln!("[turn] done{err}"),
             }
         }
-        RateLimit { limit_kind, .. } => eprintln!("[rate-limit] {limit_kind}"),
+        RateLimit {
+            limit_kind,
+            used_percent,
+            status,
+            ..
+        } => {
+            let pct = used_percent
+                .map(|p| format!(" {p:.0}%"))
+                .unwrap_or_default();
+            let st = status.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default();
+            eprintln!("[rate-limit] {limit_kind}{pct}{st}");
+        }
         Error { message, fatal } => {
             eprintln!("[error{}] {message}", if *fatal { " fatal" } else { "" });
         }

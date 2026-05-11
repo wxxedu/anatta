@@ -327,6 +327,10 @@ impl Projector for StreamProjector {
                         .rate_limit_type
                         .clone()
                         .unwrap_or_else(|| "unknown".into()),
+                    // Claude reports a 0.0–1.0 fraction; we normalize to
+                    // 0–100 for parity with codex's `used_percent`.
+                    used_percent: r.rate_limit_info.utilization.map(|u| u * 100.0),
+                    status: Some(rate_limit_status_str(&r.rate_limit_info.status).to_owned()),
                     resets_at: r.rate_limit_info.resets_at.map(|x| x as i64),
                     using_overage: r.rate_limit_info.is_using_overage,
                 },
@@ -524,6 +528,15 @@ fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
 }
 
+fn rate_limit_status_str(s: &stream::RateLimitStatus) -> &'static str {
+    use stream::RateLimitStatus::*;
+    match s {
+        Allowed => "ok",
+        AllowedWarning => "warning",
+        Rejected => "rejected",
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────────────
@@ -599,15 +612,27 @@ mod tests {
 
     #[test]
     fn stream_rate_limit_event() {
-        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1778414400,"rateLimitType":"five_hour","isUsingOverage":false},"uuid":"u","session_id":"s"}"#;
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1778414400,"rateLimitType":"five_hour","utilization":0.87,"isUsingOverage":false},"uuid":"u","session_id":"s"}"#;
         let ev: stream::ClaudeStreamEvent = serde_json::from_str(line).unwrap();
         let evs = StreamProjector::new().project(&ev, &ctx());
         assert_eq!(evs.len(), 1);
         match &evs[0].payload {
-            AgentEventPayload::RateLimit { limit_kind, resets_at, using_overage } => {
+            AgentEventPayload::RateLimit {
+                limit_kind,
+                used_percent,
+                status,
+                resets_at,
+                using_overage,
+            } => {
                 assert_eq!(limit_kind, "five_hour");
                 assert_eq!(resets_at, &Some(1778414400));
                 assert_eq!(using_overage, &Some(false));
+                // 0.87 → 87.0 (0–100 normalized)
+                assert!(
+                    (used_percent.unwrap() - 87.0).abs() < 1e-9,
+                    "got {used_percent:?}"
+                );
+                assert_eq!(status.as_deref(), Some("warning"));
             }
             _ => panic!("expected RateLimit"),
         }

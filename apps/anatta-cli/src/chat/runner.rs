@@ -147,6 +147,7 @@ async fn run_chat(
     }
 
     let result: Result<(), ChatError> = loop {
+        renderer.pre_prompt();
         match input.read_prompt() {
             ReadOutcome::Eof | ReadOutcome::Interrupted => {
                 break Err(ChatError::InputClosed);

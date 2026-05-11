@@ -129,8 +129,23 @@ pub enum AgentEventPayload {
         is_error: bool,
     },
     RateLimit {
-        /// Window kind (e.g. "five_hour", "seven_day").
+        /// Window kind. Claude uses `"five_hour"` / `"seven_day"`; codex
+        /// uses `"primary"` / `"secondary"` (the snapshot exposes two
+        /// rolling windows side-by-side rather than naming them).
         limit_kind: String,
+        /// Percentage of the window consumed, normalized to 0–100 across
+        /// backends (claude's wire-level `utilization` is 0.0–1.0; codex
+        /// already emits 0–100). `None` means the backend didn't include
+        /// this in the event — not "0%".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        used_percent: Option<f64>,
+        /// Status of this window: `"ok"` (under limit), `"warning"`
+        /// (claude `allowed_warning` / approaching), `"rejected"` (limit
+        /// hit). Codex doesn't emit a per-window status; we synthesize
+        /// `"rejected"` when its top-level `rate_limit_reached_type` is
+        /// set, otherwise leave `None`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resets_at: Option<i64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -198,12 +198,12 @@ fn event_msg(msg: &history::EventMsg, ts: DateTime<Utc>, ctx: &ProjectionContext
                 is_error: true,
             },
         }],
-        TokenCount { info, .. } => {
+        TokenCount { info, rate_limits } => {
             let input = info.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let output = info.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
             let cache_read = info.get("cached_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            vec![AgentEvent {
-                envelope: env,
+            let mut out = vec![AgentEvent {
+                envelope: env.clone(),
                 payload: AgentEventPayload::Usage {
                     input_tokens: input,
                     output_tokens: output,
@@ -211,7 +211,13 @@ fn event_msg(msg: &history::EventMsg, ts: DateTime<Utc>, ctx: &ProjectionContext
                     cache_create: 0,
                     cost_usd: None,
                 },
-            }]
+            }];
+            if let Some(snap) = rate_limits {
+                for ev in rate_limit_events_from_snapshot(&env, snap) {
+                    out.push(ev);
+                }
+            }
+            out
         }
         // ExecCommandEnd / PatchApplyEnd / WebSearchEnd / McpToolCallEnd /
         // ViewImageToolCall / CollabAgent* / GuardianAssessment /
@@ -460,6 +466,55 @@ fn codex_envelope(
     }
 }
 
+/// Project a [`RateLimitSnapshot`] into one [`RateLimit`] event per
+/// populated window (primary, secondary). The envelope is cloned for
+/// each event so callers pass the parent event's envelope as the
+/// template. Same helper is used by the history projector (TokenCount
+/// carries this) and the app-server projector
+/// (`account/rateLimits/updated` carries this).
+///
+/// `status` is derived from the snapshot's `rate_limit_reached_type`:
+/// `Some(_)` → `"rejected"` (binding limit hit); `None` → `"ok"`.
+/// We can't synthesize `"warning"` for codex — the snapshot has no
+/// such intermediate state, so callers wanting "near-limit" highlighting
+/// should threshold on `used_percent` themselves.
+pub(crate) fn rate_limit_events_from_snapshot(
+    envelope: &AgentEventEnvelope,
+    snap: &history::RateLimitSnapshot,
+) -> Vec<AgentEvent> {
+    let status = if snap.rate_limit_reached_type.is_some() {
+        "rejected"
+    } else {
+        "ok"
+    };
+    let mut out = Vec::new();
+    if let Some(w) = &snap.primary {
+        out.push(rate_limit_event_from_window(envelope, "primary", w, status));
+    }
+    if let Some(w) = &snap.secondary {
+        out.push(rate_limit_event_from_window(envelope, "secondary", w, status));
+    }
+    out
+}
+
+fn rate_limit_event_from_window(
+    envelope: &AgentEventEnvelope,
+    kind: &str,
+    window: &history::RateLimitWindow,
+    status: &str,
+) -> AgentEvent {
+    AgentEvent {
+        envelope: envelope.clone(),
+        payload: AgentEventPayload::RateLimit {
+            limit_kind: kind.to_owned(),
+            used_percent: Some(window.used_percent),
+            status: Some(status.to_owned()),
+            resets_at: window.resets_at,
+            using_overage: None,
+        },
+    }
+}
+
 fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
 }
@@ -518,6 +573,52 @@ mod tests {
                 assert_eq!(text_so_far, "hello");
             }
             _ => panic!("expected AssistantTextDelta"),
+        }
+    }
+
+    #[test]
+    fn history_token_count_emits_usage_then_rate_limits() {
+        let line = r#"{"timestamp":"2026-05-10T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":10},"rate_limits":{"primary":{"used_percent":75.5,"resets_at":1778414400},"secondary":{"used_percent":12.0},"rate_limit_reached_type":null}}}"#;
+        let ev: history::CodexEvent = serde_json::from_str(line).unwrap();
+        let evs = HistoryProjector::new().project(&ev, &ctx());
+        assert_eq!(evs.len(), 3, "Usage + primary RateLimit + secondary RateLimit");
+        assert!(matches!(evs[0].payload, AgentEventPayload::Usage { .. }));
+        match &evs[1].payload {
+            AgentEventPayload::RateLimit {
+                limit_kind,
+                used_percent,
+                status,
+                resets_at,
+                ..
+            } => {
+                assert_eq!(limit_kind, "primary");
+                assert!((used_percent.unwrap() - 75.5).abs() < 1e-9);
+                assert_eq!(status.as_deref(), Some("ok"));
+                assert_eq!(resets_at, &Some(1778414400));
+            }
+            _ => panic!("expected primary RateLimit"),
+        }
+        match &evs[2].payload {
+            AgentEventPayload::RateLimit { limit_kind, used_percent, .. } => {
+                assert_eq!(limit_kind, "secondary");
+                assert!((used_percent.unwrap() - 12.0).abs() < 1e-9);
+            }
+            _ => panic!("expected secondary RateLimit"),
+        }
+    }
+
+    #[test]
+    fn history_token_count_rejected_status_when_limit_reached() {
+        let line = r#"{"timestamp":"2026-05-10T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{},"rate_limits":{"primary":{"used_percent":100.0},"rate_limit_reached_type":"rate_limit_reached"}}}"#;
+        let ev: history::CodexEvent = serde_json::from_str(line).unwrap();
+        let evs = HistoryProjector::new().project(&ev, &ctx());
+        // Usage + one RateLimit (primary only).
+        assert_eq!(evs.len(), 2);
+        match &evs[1].payload {
+            AgentEventPayload::RateLimit { status, .. } => {
+                assert_eq!(status.as_deref(), Some("rejected"));
+            }
+            _ => panic!("expected RateLimit"),
         }
     }
 
