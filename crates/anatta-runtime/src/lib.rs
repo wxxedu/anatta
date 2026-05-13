@@ -24,8 +24,10 @@
 
 pub mod claude;
 pub mod codex;
+pub mod conversation;
 pub mod profile;
 pub mod session_lock;
+pub mod transcode;
 
 pub use session_lock::{LockError, SessionLock};
 
