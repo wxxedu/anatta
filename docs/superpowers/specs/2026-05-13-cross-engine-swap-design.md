@@ -1233,9 +1233,45 @@ For each existing segment dir:
 No file rewrites are needed; tier 1/2 segments are naturally compatible
 with tier 3's canonical-per-segment-engine invariant.
 
-## Codex resume spike (pre-implementation gate)
+## Codex resume spike (RESOLVED 2026-05-13)
 
-### Goal
+### Result
+
+**RolloutInjection works.** Codex honors `thread/resume <thread_id>`
+against a rollout file anatta wrote into `<CODEX_HOME>/sessions/.../`.
+No prior state_5.sqlite registration is required: codex auto-inserts a
+`threads` row from the rollout's `session_meta` on first resume.
+
+Empirical evidence from spike (codex-cli 0.125.0):
+- Hand-crafted 4-line rollout: `session_meta` + `turn_context` + user
+  `response_item` + assistant `response_item`.
+- `thread/resume {threadId: "019c1234-0000-7000-8000-000000000001"}`
+  returned `result.thread.id = our id`, `result.thread.path = our file`,
+  `result.thread.preview = our user text`.
+- A follow-up `turn/start` with the prompt "what is my favorite
+  color?" produced the assistant response **literally containing
+  `anatta-spike-purple-7`** — the unique sentinel string from our
+  rollout. inputTokens = 27913 confirms full replay (the rollout +
+  codex's own injected permissions/skills/apps preamble).
+
+Known harmless: codex logs one
+`ERROR codex_core::session: failed to record rollout items: thread X not found`
+to stderr per resume (a pre-registration ordering quirk inside codex
+session bootstrap). Does not affect resume correctness; ignore in
+production by filtering codex stderr for this exact message.
+
+### What this resolves
+
+- §4 working area: rollout-injection path is the actual implementation;
+  PromptInjection fallback section is informational only and may be
+  removed in a final spec revision.
+- §3.8 codex sub-agent absorb: still required (we copy sub rollouts
+  into central sidecar from `state_5.sqlite` lookup) because the same
+  auto-registration applies to sub-agent threads — codex will register
+  them when resumed, but our prior absorb still needs them locally.
+- §10 (this section): spike is no longer pre-implementation gate.
+
+### Goal (historical, for reference)
 
 Determine the minimum set of artifacts codex needs to honor
 `thread/resume <thread_id>` against a rollout file anatta wrote.
