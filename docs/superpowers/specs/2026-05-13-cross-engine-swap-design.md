@@ -376,7 +376,7 @@ Deterministic ids matter because:
 | `assistant` `message.content[]` `type:"text"` | `response_item::Message { role: "assistant", content: [OutputText{text}] }` |
 | `assistant` `message.content[]` `type:"thinking"` | **drop** |
 | `assistant` `message.content[]` `type:"tool_use"` (name != "Task") | `response_item::FunctionCall { call_id: map_tool_call_id(tool_use_id, Claude, Codex), name, arguments: serde_json::to_string(input)? }` |
-| `assistant` `message.content[]` `type:"tool_use"` name=="Task" | `event_msg::CollabAgentSpawnEnd { call_id: map_tool_call_id(tool_use_id), model: "(transcoded)", new_agent_nickname: input.subagent_type.unwrap_or("agent"), new_agent_role: input.description, new_thread_id: view_sub_thread_id(view_id, sub_index), prompt: input.prompt, reasoning_effort: "medium", sender_thread_id: view_id, status: "completed" }` then recurse into sub-transcript |
+| `assistant` `message.content[]` `type:"tool_use"` name=="Task" | **Spike-pending (§10b).** Initial codex review of 434 real rollouts found 0 occurrences of `event_msg::collab_agent_spawn_end`; collab/sub-agent emission shape is unproven. Until the spike resolves this, transcoder represents Task as a plain `response_item::FunctionCall { name: "Task", arguments }` plus a paired `FunctionCallOutput` carrying the sub-agent's final assistant message; the recursive sub-rollout is still emitted but the new engine will see it as a labeled tool call, not as a tracked collab thread |
 | `system/compact_boundary` event | suppressed (the synthesized `isCompactSummary` user that follows produces the `compacted` row) |
 | `attachment` event | `response_item::Message { role: "user", content: [InputText{text: "[attachment: <type>: <path>]"}] }` (claude attachments don't have a clean codex equivalent; degrade to descriptive text) |
 | Any `parentUuid`, `uuid`, `logicalParentUuid`, `sessionId`, `gitBranch`, `version`, `entrypoint`, `slug`, `timestamp`, `isSidechain` fields | dropped (codex has no DAG model and no equivalent envelope) |
@@ -411,10 +411,11 @@ DAG → linear flatten:
 | `response_item::GhostSnapshot` | dropped (claude has no analogue) |
 | `event_msg::AgentMessage` | dropped — the same content was already emitted via the paired `response_item::Message{assistant,OutputText}` |
 | `event_msg::UserMessage` | dropped — same reason |
-| `event_msg::CollabAgentSpawnEnd` | `assistant` line `tool_use{name:"Task", input:{description: new_agent_role, prompt, subagent_type: new_agent_nickname}, id: map_tool_call_id(call_id, Codex, Claude)}`; recurse on the named `new_thread_id` sub-rollout |
-| `event_msg::CollabAgentInteractionEnd` | `user` line `tool_result{tool_use_id: map_tool_call_id(call_id), content: "(interaction follow-up: \"<prompt>\")"}` plus subsequent `tool_use{name:"Task", id: <fresh>}` for the follow-up turn |
-| `event_msg::CollabCloseEnd` | dropped (claude has no Task-close event) |
-| `event_msg::CollabWaitingEnd` | dropped |
+| `event_msg::CollabAgentSpawnEnd` (if encountered; **rare per spike data**) | `assistant` line `tool_use{name:"Task", input:{description: new_agent_role, prompt, subagent_type: new_agent_nickname}, id: map_tool_call_id(call_id, Codex, Claude)}`; recurse on the named `new_thread_id` sub-rollout located via state_5.sqlite (see §absorb-sub-agent) |
+| `event_msg::CollabAgentInteractionEnd` (rare) | `user` line `tool_result{tool_use_id: map_tool_call_id(call_id), content: "(interaction follow-up: \"<prompt>\")"}` plus subsequent `tool_use{name:"Task", id: <fresh>}` for the follow-up turn |
+| `event_msg::CollabCloseEnd` (rare) | dropped (claude has no Task-close event) |
+| `event_msg::CollabWaitingEnd` (rare) | dropped |
+| `response_item::FunctionCall { name == "spawn_agent" \| similar mcp name }` (**spike to discover**) | mapped to `tool_use{name:"Task", ...}` if spike reveals codex sub-agents are emitted as a function-call shape rather than the collab event_msg |
 | `event_msg::ExecCommandEnd` / `PatchApplyEnd` / `McpToolCallEnd` | dropped — the paired `FunctionCallOutput` already carries the tool result; these event_msgs are codex's own UI-facing duplicates |
 | `event_msg::TokenCount`, `TaskStarted`, `TaskComplete`, `TurnAborted` | dropped |
 | `event_msg::GuardianAssessment` | dropped (no claude analogue) |
@@ -439,12 +440,23 @@ UUID synthesis (codex → claude):
 
 When transcoder encounters `assistant.message.content[].tool_use.name == "Task"`:
 
-1. `sub_use_id = the tool_use.id`.
-2. Locate sub transcript at
-   `<source_sidecar_dir>/subagents/<sub_use_id>.jsonl` (claude convention
-   stores sub-agent transcripts under the parent's session_uuid sidecar
-   dir, keyed by the tool_use id; verify empirically in spike).
-3. If file missing, return `TranscodeError::MissingSubAgent`.
+1. `sub_use_id = the tool_use.id` (a `toolu_*` id).
+2. Locate sub transcript by scanning `<source_sidecar_dir>/subagents/`
+   for `agent-*.jsonl` + matching `agent-*.meta.json`. **Filenames are
+   keyed by claude's `agentId` (e.g. `agent-af18b008bf0e68f93.jsonl`),
+   NOT by `tool_use_id`.** The link from tool_use_id → agentId is:
+   - The meta.json file contains `{agentType, description, ...}`.
+   - The parent's `tool_use.input` carries `{subagent_type, description, prompt}`.
+   - Match heuristic: pair sub-agent files to parent tool_uses by
+     (subagent_type == agentType) AND (description == description),
+     within the same segment, in declaration order.
+   - On ambiguity, fall back to absorbing all sub-agent files into the
+     view without parent-linkage and let the transcoder emit a
+     "(sub-agent transcript present but unmatched)" comment in the
+     parent's tool_result.
+3. If no matching sub-agent file found, emit a degraded `tool_result`
+   with text "(sub-agent transcript unavailable)" rather than failing
+   the entire transcode.
 4. Compute `sub_view_id = view_sub_thread_id(view_id, sub_index)`.
 5. Recurse: `transcode_to(Engine::Codex, TranscodeInput { source_events_jsonl: sub_path, source_engine_session_id: <derived from tool_use_id>, ... }, view_dir.join("subagents").join(format!("{sub_view_id}.jsonl")))`.
 6. Emit `CollabAgentSpawnEnd { ..., new_thread_id: sub_view_id }` in the parent codex view.
@@ -468,18 +480,35 @@ When transcoder encounters `event_msg::CollabAgentSpawnEnd { new_thread_id, ... 
 
 ### Codex sub-agent absorb (new step)
 
-Codex sub-agents are independent sessions whose rollouts live at sibling
-paths under `<CODEX_HOME>/sessions/.../`. Tier 1's absorb only handles
-the main rollout. Tier 3 absorb extends:
+Codex sub-agents are independent sessions. Their existence and rollout
+path are tracked in **`<CODEX_HOME>/state_5.sqlite`** — specifically two
+tables (column names verified during spike, see §10):
+
+- `threads(thread_id, rollout_path, ...)` — every codex thread, including
+  sub-agent threads.
+- `thread_spawn_edges(parent_thread_id, child_thread_id, status, ...)` —
+  parent→child relation.
+
+Tier 1 absorb only handles the main rollout. Tier 3 absorb extends:
 
 ```
-After absorbing main rollout for a codex segment, scan main for
-event_msg::CollabAgentSpawnEnd { new_thread_id }. For each:
-  Locate <CODEX_HOME>/sessions/.../rollout-*-<new_thread_id>.jsonl
-  Copy it into <central_segment_dir>/sidecar/subagents/<new_thread_id>.jsonl
+After absorbing main rollout for a codex segment:
+  1. Open <CODEX_HOME>/state_5.sqlite read-only.
+  2. SELECT child_thread_id FROM thread_spawn_edges
+       WHERE parent_thread_id = <segment.engine_session_id>.
+  3. For each child:
+       SELECT rollout_path FROM threads WHERE thread_id = child.
+       Copy that rollout file → <central_segment_dir>/sidecar/subagents/<child_thread_id>.jsonl.
+  4. If any child has further descendants (depth > 1), recurse.
 ```
 
 The codex_to_claude transcoder later reads this sidecar dir.
+
+**Failure mode**: if `state_5.sqlite` is locked (another codex
+process running) or the schema differs from what we expect, log a
+warning and skip sub-agent absorb for that codex segment. The main
+rollout still absorbs normally; sub-agents simply won't appear in
+later cross-engine renders.
 
 ### Atomicity
 
@@ -601,26 +630,40 @@ conversation shared `conversation.session_uuid`. Tier 3 drops that
 column; each segment now has its own `engine_session_id`. When
 concatenating multiple claude segments into a single working file at
 `<active_segment.engine_session_id>.jsonl`, every line's `sessionId`
-must be rewritten to `active_segment.engine_session_id`. Reasoning:
-claude's resume implementation may inspect line-level `sessionId`
-fields; presenting it with a transcript whose lines reference multiple
-distinct session uuids is undefined behavior.
+should match `active_segment.engine_session_id`. Whether claude CLI
+actually validates line-level sessionId at resume time is **empirically
+unproven**; tier 1's spike proved only that `--resume <id>` works
+against a file at `<id>.jsonl`. Conservative path: rewrite per-line.
 
-This rewriting:
-- applies to every line during `apply_policy_to_target` for claude
-  target.
-- is a verbatim string substitution at the JSON-encoded
-  `"sessionId":"<old>"` level (cheaper than full parse/re-emit).
-- happens in both `apply_codex_segment`'s analogue for claude (the
-  existing per-segment policy code) and in the transcoder's
-  codex→claude output (where every emitted line takes `sessionId =
-  view_engine_session_id` initially; render then rewrites to
-  active_segment.engine_session_id).
+Implementation:
+- For every line being written into the claude working file:
+  - Parse via `serde_json::Value` (NOT typed `ClaudeEvent`, to preserve
+    unknown fields claude may add).
+  - If the value is an object with a `"sessionId"` field, replace it
+    with `active_segment.engine_session_id`.
+  - Re-emit via `serde_json::to_string`. (Cost: ~50µs per line for
+    typical-size events; acceptable given total transcripts are bounded
+    by claude's context window.)
+- Raw string substitution at the `"sessionId":"<old>"` literal level
+  was considered and **rejected**: a malformed line containing the
+  literal `"sessionId":"..."` in escaped JSON-in-a-string would be
+  corrupted by literal substitution. Parse/re-emit is the safe choice.
 
-For codex, the equivalent issue doesn't arise because `session_meta`
-appears only once at the top of each rollout, and our preamble-skip
-removes the per-segment ones; the working file has exactly one
-session_meta (the one written by `write_codex_preamble`) with the
+This rewriting runs in:
+- `apply_claude_segment` (the same-engine policy applier).
+- The transcoder's codex→claude output sentinel pass (transcoder emits
+  with sessionId = view_engine_session_id; render then rewrites).
+
+**Empirical follow-up**: a small spike (one synthesized claude jsonl
+with three lines that have different sessionId values) verifies whether
+claude CLI rejects/warns or accepts and proceeds. Run before final
+implementation; if claude tolerates mismatched sessionIds, the rewrite
+becomes optional optimization rather than correctness requirement.
+
+For codex, the equivalent issue doesn't arise: each rollout has
+exactly one `session_meta`, our event-type-based preamble filter
+removes per-segment session_metas, and the working file has exactly
+one session_meta (the one written by `write_codex_preamble`) with the
 right id.
 
 ### `min_policy_for` extension
@@ -681,40 +724,66 @@ fn write_codex_preamble(
 This preamble is **only** for the working file. The central canonical
 of a codex segment starts with codex's own `session_meta` (written by
 codex itself), not this synthesized one. Render's `apply_policy_to_target`
-for same-engine codex segments must skip **only the first two lines** of
-the source canonical (the initial `session_meta` + first `turn_context`
-that codex emits at session start). Mid-session `turn_context` lines
-(one per turn) are kept verbatim — they carry per-turn model/policy
-state that downstream replay needs. Specifically:
+for same-engine codex segments must filter **by event type**, not by
+line index — real codex rollouts often interleave `event_msg`s
+(`thread_name_updated`, `task_started`) and bootstrap `response_item`s
+(developer / user messages) BEFORE the first `turn_context`. Specifically:
 
 ```rust
 fn apply_codex_segment(src: &Path, out: &mut impl Write) -> Result<()> {
-    let mut iter = BufReader::new(File::open(src)?).lines();
-    // Skip first session_meta line.
-    let first = iter.next().transpose()?;
-    debug_assert!(first.as_deref().map_or(true, |l| l.contains("\"session_meta\"")));
-    // Skip first turn_context line.
-    let second = iter.next().transpose()?;
-    debug_assert!(second.as_deref().map_or(true, |l| l.contains("\"turn_context\"")));
-    // Copy the rest verbatim.
-    for line in iter {
+    let mut first_session_meta_seen = false;
+    let mut first_turn_context_seen = false;
+    for line in BufReader::new(File::open(src)?).lines() {
         let line = line?;
-        if line.is_empty() { continue; }
-        writeln!(out, "{}", line)?;
+        if line.trim().is_empty() { continue; }
+        // Parse to identify event type. Use a cheap top-level lookup; do not
+        // round-trip to typed CodexEventKind (which is strict and would fail
+        // on unknown fields claude doesn't care about).
+        let val: serde_json::Value = serde_json::from_str(&line)
+            .map_err(RenderError::ParseSource)?;
+        let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match event_type {
+            "session_meta" if !first_session_meta_seen => {
+                first_session_meta_seen = true;
+                continue;  // drop the canonical's bootstrap session_meta
+            }
+            "turn_context" if !first_turn_context_seen => {
+                first_turn_context_seen = true;
+                continue;  // drop the canonical's bootstrap turn_context
+            }
+            _ => {
+                writeln!(out, "{}", line)?;
+            }
+        }
     }
     Ok(())
 }
 ```
 
+The "first occurrence of (session_meta, turn_context) is bootstrap;
+subsequent occurrences are mid-session and preserved" rule was
+empirically derived from 434 real codex rollouts (none of which had a
+second session_meta; most had additional turn_contexts at every turn
+boundary).
+
+Bootstrap `response_item` rows that precede the first `turn_context`
+(e.g., codex's own pre-built developer instructions; user system
+messages emitted by codex internally before the first user turn) are
+**preserved** by the rule above — they sit between session_meta and
+the first turn_context but are kept because their type is
+`response_item`, not session_meta/turn_context. Downstream codex
+replay treats them as part of the conversation history; this is the
+right semantics.
+
 Cross-engine (transcoded view) codex segments **also** have a preamble
 in their view file: the transcoder writes a self-consistent codex
 rollout starting with its own `session_meta` + `turn_context` (so the
 view is a valid standalone codex rollout file usable in isolation). The
-same two-line skip therefore applies uniformly — whether the source is
-codex canonical or a codex view, the first two lines are dropped on
-concatenation into the working file. The transcoder's preamble emits
-session_meta.id = view_engine_session_id, which is meaningful inside
-the view but discarded on concatenation.
+same event-type filter therefore applies uniformly — whether the source
+is codex canonical or a codex view, the first session_meta + first
+turn_context are dropped on concatenation into the working file. The
+transcoder's preamble emits session_meta.id = view_engine_session_id,
+which is meaningful inside the view but discarded on concatenation.
 
 ### Codex working area: rollout injection vs prompt-injection fallback
 
@@ -915,15 +984,40 @@ engine conversations show a `Σ` marker.
 
 ### Migration 0007 (additive + Rust backfill + final DROP)
 
+**Three separate SQL migration files, with a Rust backfill running
+between the first and third.** `sqlx::migrate!` runs SQL migrations
+strictly in order at startup; the Rust backfill executes after
+migrations and before any normal code path so an interrupted process
+can be re-launched and the backfill re-runs idempotently.
+
+**FK pragma**: `Store::open` (crates/anatta-store/src/lib.rs:38) does
+not enable SQLite foreign keys; the `ON DELETE RESTRICT` on
+`conversation_segments.profile_id` is therefore advisory only. Before
+running the backfill, anatta either (a) enables `PRAGMA foreign_keys = ON`
+on the connection, or (b) runs an explicit precheck:
+
 ```sql
--- 0007_cross_engine.sql, step 1: additive
+SELECT cs.id, cs.profile_id
+FROM conversation_segments cs
+LEFT JOIN profile p ON p.id = cs.profile_id
+WHERE p.id IS NULL;
+```
+
+If any rows return, the backfill aborts loudly with a list of orphan
+segment ids; the user must resolve manually (delete orphan segments or
+restore the missing profile) before retrying. This is non-destructive
+and reversible.
+
+```sql
+-- 0007a_cross_engine_additive.sql
 BEGIN;
 ALTER TABLE conversation_segments ADD COLUMN backend TEXT NOT NULL DEFAULT 'claude';
 ALTER TABLE conversation_segments ADD COLUMN engine_session_id TEXT;
 COMMIT;
 ```
 
-Rust backfill, run on startup if any legacy rows exist:
+Rust backfill, run on startup after `sqlx::migrate!`, **before any
+other code path opens conversation rows**. Idempotent:
 
 ```rust
 async fn backfill_cross_engine(store: &Store) -> Result<()> {
@@ -950,8 +1044,11 @@ async fn backfill_cross_engine(store: &Store) -> Result<()> {
                AND cs.engine_session_id IS NULL"
     ).execute(&mut *tx).await?;
 
-    // 3. After 2, mark migration step 1 complete.
-    sqlx::query!("INSERT OR REPLACE INTO migration_state (key, value) VALUES ('0007_step1', 'done')")
+    // 3. Backfill complete marker. A dedicated marker table is cheaper
+    //    than a new sqlx_migrations row.
+    sqlx::query("CREATE TABLE IF NOT EXISTS anatta_backfill_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        .execute(&mut *tx).await?;
+    sqlx::query("INSERT OR REPLACE INTO anatta_backfill_state (key, value) VALUES ('0007_step1', 'done')")
         .execute(&mut *tx).await?;
 
     tx.commit().await?;
@@ -960,17 +1057,38 @@ async fn backfill_cross_engine(store: &Store) -> Result<()> {
 ```
 
 ```sql
--- 0007_cross_engine.sql, step 2: drop now-redundant conversations columns.
--- Run only after 0007_step1 = done. Driver verifies this before applying step 2.
+-- 0007b_cross_engine_drop.sql: drop now-redundant conversations columns.
+-- This migration's up step first verifies the backfill ran.
 BEGIN;
+-- Verify backfill completed. If not, ABORT prevents the DROP from running.
+SELECT CASE
+  WHEN (SELECT COUNT(*) FROM anatta_backfill_state WHERE key = '0007_step1' AND value = 'done') = 0
+    THEN RAISE(ABORT, 'backfill 0007_step1 not complete; refusing to DROP conversations columns')
+END;
+-- Also verify no segment row has a NULL backend or NULL engine_session_id where it shouldn't.
+SELECT CASE
+  WHEN (SELECT COUNT(*) FROM conversation_segments WHERE backend IS NULL) > 0
+    THEN RAISE(ABORT, 'conversation_segments rows with NULL backend exist; backfill incomplete')
+END;
 ALTER TABLE conversations DROP COLUMN backend;
 ALTER TABLE conversations DROP COLUMN session_uuid;
 COMMIT;
 ```
 
-Both `migration_state` row writes and the SQL DROP go through the same
-SQL migration driver. The driver checks `migration_state.0007_step1 = done`
-before applying step 2's DROP.
+**Interrupt safety**: at any point, the migration sequence is
+re-runnable. If anatta crashes:
+- Between 0007a and backfill: backfill runs on next startup. SQL is
+  re-applied trivially (migrations table records 0007a as done).
+- Mid-backfill: idempotent. SET WHERE backend IS NULL is a no-op for
+  already-backfilled rows; UPDATE engine_session_id WHERE NULL is the same.
+- Between backfill and 0007b: 0007b runs on next startup, sees the
+  done marker, proceeds.
+- During 0007b: SQLite transaction rolls back; user retries.
+
+**FK enable in steady state**: independent of migration, `Store::open`
+gains `PRAGMA foreign_keys = ON` via `SqliteConnectOptions::pragma(...)`.
+This is a small standalone change (not gated on tier 3) and should
+ship before 0007.
 
 ### Central store layout migration
 
@@ -999,6 +1117,12 @@ Determine the minimum set of artifacts codex needs to honor
 ```
 export CODEX_HOME=/tmp/anatta-codex-spike
 mkdir -p $CODEX_HOME/sessions/2026/05/13
+# Copy a real recent rollout from ~/.codex/sessions/ for reference shape.
+cp ~/.codex/sessions/2026/<latest dir>/rollout-*.jsonl /tmp/codex-real-rollout.jsonl
+# Also copy state_5.sqlite to inspect schema:
+cp ~/.codex/state_5.sqlite /tmp/codex-state-schema.sqlite
+sqlite3 /tmp/codex-state-schema.sqlite ".schema threads"
+sqlite3 /tmp/codex-state-schema.sqlite ".schema thread_spawn_edges"
 ```
 
 Hand-craft a minimal rollout:
@@ -1016,19 +1140,38 @@ $CODEX_HOME/sessions/2026/05/13/rollout-2026-05-13T12-00-00-019c1234-5678-9abc-d
 ```
 1. Spawn `codex app-server` against this CODEX_HOME.
 2. Send: initialize → initialized → thread/resume {threadId: "019c1234-..."}.
-3. Observe the response:
-   - If `result.thread.id == <our id>` and no error → resume worked. Send turn/start with a follow-up
-     ("based on my earlier 'hello', what now?"). If assistant's response references the earlier turn,
-     full success.
-   - If error: try registering in session_index.jsonl with one line, retry.
-   - If still error: inspect state_5.sqlite schema. Try to add the minimal row. Retry.
-   - If still error: declare rollout-injection unviable.
+3. Observe the response. The current spawn driver does not validate the
+   returned thread.id against the requested one (spawn/codex.rs:545) —
+   the spike must do that check explicitly to detect "codex silently
+   started a fresh thread instead of resuming".
+4. Decision tree:
+   - If `result.thread.id == requested id` AND a subsequent turn/start
+     produces an assistant response that references the prior fake "hello":
+     → rollout-injection works with sessions/ alone. Done.
+   - If `result.thread.id != requested id` OR no reference to prior turn:
+     → codex didn't actually resume our content. Try:
+       a. Add a `threads` row in state_5.sqlite with (thread_id, rollout_path).
+          Schema discovered from inspecting `~/.codex/state_5.sqlite`.
+       b. Retry. If now resumes correctly → rollout + state_5 row is the requirement.
+       c. If still no: add thread_spawn_edges row (root: no parent_thread_id).
+          Retry.
+       d. If still no: declare rollout-injection unviable → fall back to
+          PromptInjection.
 
-4. Record findings under §"Spike result" of this design doc (added by the
-   spike author). If spike requires session_index.jsonl entries, document the
-   exact line format observed in real codex sessions. If it requires
-   state_5.sqlite entries, document the minimum schema (table name,
-   columns, NOT NULL constraints) needed.
+5. Also exercise sub-agent path: spawn a real codex sub-agent through the
+   real codex CLI (e.g., via an agent-spawning prompt), observe:
+   - The on-wire shape of the spawn event (response_item vs event_msg
+     vs collab stream item).
+   - The state_5.sqlite rows written (threads / thread_spawn_edges).
+   - The location of the sub-agent's rollout file.
+   This resolves the open question in §3.4 about Task → codex mapping.
+
+6. Record findings under §"Spike result" appended to this design doc.
+   Document:
+   - Exact state_5.sqlite schema for `threads`, `thread_spawn_edges`,
+     and any other table involved in resume.
+   - Whether session_index.jsonl is necessary.
+   - The empirical on-wire shape of sub-agent spawning.
 ```
 
 ### Fallback if rollout-injection unviable
@@ -1052,9 +1195,18 @@ match codex_resume_mode {
 ```
 
 `prefix_input` is a new field on `CodexLaunch` (today `prompt` is a
-single string; we add a separate field whose contents become the
-`turn/start.input[0]` if non-None, with the user's actual prompt as
-`input[1]`).
+single string; we add a separate `Option<String>` field whose contents
+become the `turn/start.input[0]` if non-None, with the user's actual
+prompt as `input[1]`). Both `CodexLaunch::launch` (one-shot send) and
+`PersistentCodexSession::send_turn` (persistent chat) must consume the
+new field; in `send_turn`, prefix_input is consumed on the first turn
+only — subsequent turns send only the user's prompt.
+
+**Risk**: codex may truncate `turn/start.input` if the total token
+count exceeds the model context window. Document this as a degradation
+mode; warn the user in the cross-engine `/profile` confirmation that
+"if prior history exceeds model context, the new engine will see a
+truncated view".
 
 ## Edge cases
 
@@ -1097,6 +1249,29 @@ between parent and child are not realistic. If they ever happen, the
 mapping is still 1:1 within a single transcript file because the source
 files were independent.
 
+### 7a. /profile-swap requested mid-turn
+
+User invokes `/profile` while a streaming response is still arriving.
+**Tier 3 rejects this**: chat REPL only allows `/profile` (or any slash
+command) when no turn is active. Same as tier 1's existing precondition
+in `chat/runner.rs`; tier 3 adds no new mid-turn path.
+
+If implementation surface accidentally exposes a way to swap mid-turn,
+the new constraint must be enforced at `Session::swap`:
+
+```rust
+impl Session {
+    pub async fn swap(&mut self, new_launch: BackendLaunch) -> Result<(), SwapError> {
+        if let Session::Codex(c) = self {
+            if c.has_active_turn() {
+                return Err(SwapError::TurnActive);
+            }
+        }
+        // ... rest as before
+    }
+}
+```
+
 ### 7. Codex segment exists but `register_codex_session` fails
 
 Render returns the error; chat surfaces it; segment is rolled back per
@@ -1114,6 +1289,35 @@ transcoder upgrade.
 
 `ON DELETE RESTRICT` on `conversation_segments.profile_id` already
 prevents this in tier 1. Unchanged.
+
+### 10a. Concurrent render of the same conversation by two anatta processes
+
+`SessionLock` (tier 1) holds for the entire chat/send session and is
+keyed by conversation name. Tier 3 takes the lock at the same point
+(before render, before any view-cache write). Two anatta processes
+opening the same conversation see one waiting on the lock; cache writes
+do not collide. Transcode `.tmp` paths are also keyed by the locked
+conversation's segment id and unique on disk.
+
+If a third process tries to view a conversation read-only (out of scope
+for tier 3 but anticipated): cache reads are safe lock-free because
+view-cache directories are written via atomic rename. A reader sees
+either the old view or the new view, never partial bytes.
+
+### 10b. Corrupt canonical events.jsonl
+
+Tier 1's `Verbatim` policy is a byte copy and never inspects content.
+Tier 3 adds a transcoder that parses the source. If parse fails:
+- Cross-engine render: transcoder returns `TranscodeError::Parse{line, source}`,
+  render propagates. Chat surfaces the error; user can decide to delete
+  the corrupt segment manually.
+- Same-engine render via `Verbatim`: bytes pass through unchanged
+  (status quo). The downstream engine's parser will see the corruption.
+- Same-engine render via `StripReasoning` or `apply_codex_segment`:
+  parse failure is now surfaced (today's `strip_reasoning` already
+  errors loudly; new `apply_codex_segment` does too).
+
+A "corrupt segment" CLI repair tool is out of scope.
 
 ### 10. Mixed-engine `anatta send --resume`
 
@@ -1209,12 +1413,25 @@ operator must have a recent one).
 
 ## Pre-implementation checklist
 
-- [ ] Codex resume spike (§10) completed.
-- [ ] Codex review of this spec completed; feedback folded in.
-- [ ] DB backup procedure documented for step 3 of migration.
+- [ ] Codex resume spike (§10) completed; rollout vs prompt fallback chosen;
+      state_5.sqlite schema documented.
+- [ ] Codex sub-agent spawn empirical shape captured (response_item vs
+      event_msg vs stream collab item).
+- [ ] Claude sub-agent file naming and parent linkage convention
+      verified against real sub-agent transcripts.
+- [ ] Claude sessionId-line-mismatch tolerance test run (does claude
+      CLI accept resume of a jsonl whose lines have mixed sessionIds?).
+- [ ] First round of codex review folded in (this revision).
+- [ ] Second round of codex review on this revised spec (to catch new
+      issues introduced by the revisions).
+- [ ] DB backup procedure documented for migration 0007b.
 - [ ] Cross-engine swap confirmation dialog text finalized with user.
-- [ ] Test fixture files prepared for both transcode directions.
+- [ ] Test fixture files prepared for both transcode directions, plus
+      sub-agent cases.
+- [ ] `PRAGMA foreign_keys = ON` patch landed (pre-tier-3 prerequisite).
+- [ ] `Session::swap` mid-turn-rejection patch landed (pre-tier-3
+      prerequisite).
 
-After all five items are checked, implementation can begin in the
-order: transcoder module → render v2 → Session::swap loosening →
-migration → /profile UI → end-to-end test.
+After all items are checked, implementation can begin in the order:
+transcoder module → render v2 → Session::swap loosening → migration
+0007 → /profile UI → end-to-end test.
