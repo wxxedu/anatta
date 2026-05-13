@@ -21,9 +21,12 @@
 //! v1 fallback flattens sub-agent activity into a single
 //! `tool_call`/`tool_result` pair carrying the sub's final message.
 
+pub mod cache;
 pub mod claude_to_codex;
 pub mod codex_to_claude;
 pub mod id_mint;
+
+pub use cache::{resolve_for_target, CacheLookup, SegmentLocation};
 
 use std::path::{Path, PathBuf};
 
