@@ -186,12 +186,22 @@ pub const PROVIDERS: &[ProviderSpec] = &[
 
 impl ProviderEnv {
     /// Resolve a final env list from `(spec, overrides, auth_token)`.
-    /// For each Anthropic-canonical field: prefer `overrides.X`, fall
-    /// back to `spec.X`, omit if both are unset. `extra_env` is always
-    /// copied verbatim (vendor-specific knobs are not user-overridable
-    /// in v1; users that need to disable one can use the `custom`
-    /// provider).
+    /// Dispatches by `spec.backend` so codex profiles get the
+    /// OpenAI-namespaced env vars and claude profiles get the
+    /// Anthropic-namespaced ones.
     pub fn build(spec: &ProviderSpec, over: &Overrides, auth_token: String) -> Self {
+        match spec.backend {
+            "claude" => Self::build_claude(spec, over, auth_token),
+            "codex" => Self::build_codex(spec, over, auth_token),
+            other => unreachable!(
+                "provider registry guarantees backend ∈ {{claude, codex}}; got {other}"
+            ),
+        }
+    }
+
+    /// Anthropic-namespaced env: ANTHROPIC_BASE_URL / ANTHROPIC_MODEL /
+    /// ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_SUBAGENT_MODEL etc.
+    fn build_claude(spec: &ProviderSpec, over: &Overrides, auth_token: String) -> Self {
         let mut vars: Vec<(String, String)> = Vec::new();
 
         let pick = |o: &Option<String>, s: Option<&'static str>| -> Option<String> {
@@ -220,6 +230,36 @@ impl ProviderEnv {
         }
         if let Some(v) = pick(&over.subagent_model, spec.subagent_model) {
             vars.push(("CLAUDE_CODE_SUBAGENT_MODEL".into(), v));
+        }
+        for (k, v) in spec.extra_env {
+            vars.push(((*k).to_string(), (*v).to_string()));
+        }
+        Self { vars }
+    }
+
+    /// OpenAI/codex-namespaced env: OPENAI_BASE_URL / OPENAI_API_KEY /
+    /// CODEX_MODEL.
+    ///
+    /// Codex auth is normally `<CODEX_HOME>/auth.json`; ProviderEnv is
+    /// used only when a profile carries an explicit API key (api_key
+    /// auth method). OAuth-authenticated codex profiles bypass
+    /// ProviderEnv entirely just like claude OAuth.
+    ///
+    /// claude-only fields on Overrides (opus/sonnet/haiku/subagent tier
+    /// names) are ignored — codex does not have an equivalent tier
+    /// concept at the env-var surface.
+    fn build_codex(spec: &ProviderSpec, over: &Overrides, auth_token: String) -> Self {
+        let mut vars: Vec<(String, String)> = Vec::new();
+
+        let pick = |o: &Option<String>, s: Option<&'static str>| -> Option<String> {
+            o.clone().or_else(|| s.map(String::from))
+        };
+        if let Some(v) = pick(&over.base_url, spec.base_url) {
+            vars.push(("OPENAI_BASE_URL".into(), v));
+        }
+        vars.push(("OPENAI_API_KEY".into(), auth_token));
+        if let Some(v) = pick(&over.model, spec.model) {
+            vars.push(("CODEX_MODEL".into(), v));
         }
         for (k, v) in spec.extra_env {
             vars.push(((*k).to_string(), (*v).to_string()));
@@ -355,5 +395,34 @@ mod tests {
         let env = ProviderEnv::build(spec, &over, "sk-custom".to_owned());
         let m = vars_to_map(&env);
         assert_eq!(m.get("ANTHROPIC_BASE_URL"), Some(&"https://example.com/api"));
+    }
+
+    #[test]
+    fn build_codex_emits_openai_namespace() {
+        let spec = lookup("openai").unwrap();
+        let env = ProviderEnv::build(spec, &Overrides::default(), "sk-openai-test".to_owned());
+        let m = vars_to_map(&env);
+        assert_eq!(m.get("OPENAI_API_KEY"), Some(&"sk-openai-test"));
+        // openai spec has all None → only API_KEY appears.
+        assert!(!m.contains_key("OPENAI_BASE_URL"));
+        assert!(!m.contains_key("CODEX_MODEL"));
+        // Claude env vars must NOT be set on a codex profile.
+        assert!(!m.contains_key("ANTHROPIC_AUTH_TOKEN"));
+        assert!(!m.contains_key("ANTHROPIC_BASE_URL"));
+    }
+
+    #[test]
+    fn build_codex_with_overrides_sets_base_url_and_model() {
+        let spec = lookup("openai").unwrap();
+        let over = Overrides {
+            base_url: Some("https://proxy.example/v1".to_owned()),
+            model: Some("gpt-5.5".to_owned()),
+            ..Default::default()
+        };
+        let env = ProviderEnv::build(spec, &over, "sk-x".to_owned());
+        let m = vars_to_map(&env);
+        assert_eq!(m.get("OPENAI_BASE_URL"), Some(&"https://proxy.example/v1"));
+        assert_eq!(m.get("CODEX_MODEL"), Some(&"gpt-5.5"));
+        assert_eq!(m.get("OPENAI_API_KEY"), Some(&"sk-x"));
     }
 }

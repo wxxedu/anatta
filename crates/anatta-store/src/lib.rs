@@ -10,7 +10,9 @@
 //! `sqlx::migrate` is idempotent.
 
 pub mod conversation;
+pub mod migrate;
 pub mod profile;
+pub mod segment;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -42,6 +44,7 @@ impl Store {
             .connect_with(opts)
             .await?;
         MIGRATOR.run(&pool).await?;
+        migrate::run_tier3_post_migration(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -53,6 +56,7 @@ impl Store {
             .connect("sqlite::memory:")
             .await?;
         MIGRATOR.run(&pool).await?;
+        migrate::run_tier3_post_migration(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -73,4 +77,6 @@ pub enum StoreError {
     UnknownBackend(String),
     #[error("unknown auth method: {0:?}")]
     UnknownAuthMethod(String),
+    #[error("migration blocked: {0}")]
+    MigrationBlocked(String),
 }

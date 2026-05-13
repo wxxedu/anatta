@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id, backend, session_uuid, created_at, cwd AS \"cwd!\"\n            FROM conversations\n            WHERE name = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "backend",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "session_uuid",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "cwd!",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "2e93e91162718ce3fc2a4f68b7e5933485855f9aaa462988ffbf445f18ef0904"
+}

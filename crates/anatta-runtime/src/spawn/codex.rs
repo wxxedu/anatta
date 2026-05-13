@@ -329,6 +329,12 @@ impl PersistentCodexSession {
         &self.thread_id
     }
 
+    /// True iff no turn is currently in progress. Used by
+    /// [`crate::spawn::Session::is_idle`] (cross-engine swap precondition).
+    pub async fn is_idle(&self) -> bool {
+        self.active_turn.lock().await.is_none()
+    }
+
     /// Clone-friendly handle for interrupting the active turn from
     /// outside (e.g., a [`TurnEvents`](crate::session::TurnEvents)
     /// wrapper that owns the channel but not the session).

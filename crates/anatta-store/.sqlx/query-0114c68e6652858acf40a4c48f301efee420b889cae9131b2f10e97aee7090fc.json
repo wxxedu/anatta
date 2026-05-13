@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE conversations\n            SET backend_session_id = ?, session_uuid = COALESCE(session_uuid, ?)\n            WHERE name = ? AND backend_session_id IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0114c68e6652858acf40a4c48f301efee420b889cae9131b2f10e97aee7090fc"
+}

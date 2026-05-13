@@ -101,6 +101,17 @@ impl Session {
         }
     }
 
+    /// True iff no turn is currently running. Claude is per-turn-spawn —
+    /// the session has no inter-turn live state, so it is always idle
+    /// when control returns to the chat loop. Codex is a long-lived
+    /// app-server; idleness depends on whether a turn is in flight.
+    pub async fn is_idle(&self) -> bool {
+        match self {
+            Session::Claude(_) => true,
+            Session::Codex(c) => c.inner.is_idle().await,
+        }
+    }
+
     /// Claude session UUID or codex thread UUID. For claude this is
     /// `None` until the first turn has produced a `system/init`.
     pub fn thread_id(&self) -> Option<&str> {
