@@ -3,15 +3,15 @@
 //! Lines from the REPL that start with `/` are routed here instead of
 //! being sent to the backend as prompts. v1 commands:
 //!
-//!   * `/profile`  — swap profile mid-chat (same-backend only)
+//!   * `/profile`  — swap profile mid-chat (any backend, tier 3)
 //!   * `/exit`, `/quit` — leave the chat (same as Ctrl-D)
 //!   * `/help`     — list available commands
 //!
-//! Cross-backend swap (`claude` → `codex` or vice versa) is rejected;
-//! it needs a history-import pipeline that hasn't been designed yet.
-//! The current `/profile` picker shows different-backend candidates
-//! with a ⚠ marker so the user sees what's there but can't pick
-//! through to corruption.
+//! Tier 3 allows cross-engine swap. The picker lists profiles from
+//! both backends; cross-engine choice triggers an explicit confirm
+//! noting reasoning blocks will be dropped from prior foreign-engine
+//! segments (text + tool calls / results are preserved by the
+//! transcoder).
 
 use anatta_store::profile::ProfileRecord;
 use dialoguer::theme::ColorfulTheme;
@@ -29,8 +29,10 @@ pub(crate) enum SlashOutcome {
     Continue,
     /// User wants to leave the chat (`/exit` / `/quit`).
     Exit,
-    /// Picker chose a same-backend profile. Caller swaps in-place
-    /// (claude: re-resolve api_key; codex: close + reopen session).
+    /// Picker chose a profile. Caller swaps in-place. Cross-engine
+    /// swaps are handled by the same outcome — the runtime layer
+    /// re-opens the session and the orchestration layer re-renders
+    /// transcoded history.
     SwapProfile { new_profile: Box<ProfileRecord> },
 }
 
@@ -58,7 +60,7 @@ pub(crate) async fn handle(
 fn print_help() {
     eprintln!(
         "available slash commands:\n  \
-        /profile         swap to a different profile (same backend only)\n  \
+        /profile         swap to a different profile (any backend)\n  \
         /exit, /quit     leave the chat (Ctrl-D works too)\n  \
         /help            show this list"
     );
@@ -74,24 +76,32 @@ async fn handle_profile(
         return Ok(SlashOutcome::Continue);
     }
 
+    let current_family_override = current.family_override.as_deref();
+
     let labels: Vec<String> = profiles
         .iter()
         .map(|p| {
             let current_marker = if p.id == current.id { "★ " } else { "  " };
-            let backend_warn = if p.backend != current.backend {
-                "  ⚠ different backend (not supported)"
+            let kind_marker = if p.id == current.id {
+                "" // active row — no extra marker
+            } else if p.backend != current.backend {
+                "  ⇄ different engine"
+            } else if p.family_override.as_deref() != current_family_override
+                || p.provider != current.provider
+            {
+                "  ⓘ different family/provider"
             } else {
                 ""
             };
             format!(
-                "{marker}{id}  ·  {backend}/{provider}  ·  {auth}  ·  \"{name}\"{warn}",
+                "{marker}{id}  ·  {backend}/{provider}  ·  {auth}  ·  \"{name}\"{kind}",
                 marker = current_marker,
                 id = p.id,
                 backend = p.backend.as_str(),
                 provider = p.provider,
                 auth = p.auth_method.as_str(),
                 name = p.name,
-                warn = backend_warn,
+                kind = kind_marker,
             )
         })
         .collect();
@@ -115,15 +125,28 @@ async fn handle_profile(
         eprintln!("already on '{}'; no change", current.id);
         return Ok(SlashOutcome::Continue);
     }
+
+    // Cross-engine swap requires explicit confirmation noting the
+    // information loss boundary (reasoning blocks dropped from prior
+    // foreign-engine segments; text + tool calls / results preserved).
     if new_profile.backend != current.backend {
         eprintln!(
-            "✗ cross-backend swap not supported yet (current: {} · target: {}). \
-             start a new chat against '{}' if you want to switch.",
+            "Switching engine: {} → {}.\n  \
+             ▸ Text and tool calls/results from prior segments are preserved.\n  \
+             ▸ Reasoning blocks (thinking/reasoning) from foreign-engine segments are dropped\n    \
+               (per-engine signatures/encrypted_content cannot cross).\n  \
+             ▸ Your own engine's reasoning is preserved when you eventually switch back.\n",
             current.backend.as_str(),
             new_profile.backend.as_str(),
-            new_profile.id,
         );
-        return Ok(SlashOutcome::Continue);
+        let confirm = dialoguer::Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Switch to '{}'?", new_profile.id))
+            .default(false)
+            .interact_opt()?;
+        match confirm {
+            Some(true) => {}
+            _ => return Ok(SlashOutcome::Continue),
+        }
     }
 
     Ok(SlashOutcome::SwapProfile {

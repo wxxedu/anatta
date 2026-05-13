@@ -9,6 +9,7 @@
 //! via [`sqlx::migrate!`]. Both CLI and daemon run them on startup;
 //! `sqlx::migrate` is idempotent.
 
+pub mod codex_state;
 pub mod conversation;
 pub mod migrate;
 pub mod profile;

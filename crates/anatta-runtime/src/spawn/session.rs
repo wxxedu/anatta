@@ -130,22 +130,66 @@ impl Session {
         }
     }
 
-    /// Reconfigure for a new same-backend launch (typically `/profile`
-    /// in chat: different auth / env / model overrides, same thread).
-    /// Cross-backend swap is rejected.
+    /// Reconfigure for a new launch.
+    ///
+    /// Same-backend swap (e.g., switching claude account or family):
+    /// the existing session is updated in place. For codex, that
+    /// means closing the live app-server and opening a new one
+    /// against the same thread id (history preserved). For claude
+    /// it's a template-replace; the next per-turn spawn uses the new
+    /// launch.
+    ///
+    /// Cross-backend swap (tier 3, e.g. claude → codex): the caller
+    /// has already opened a new segment under the new backend and
+    /// rendered the working file. `swap` here is just the runtime-
+    /// side seam:
+    ///   1. Verify no turn is in flight (idle precondition).
+    ///   2. Tear down the old session (codex: close app-server;
+    ///      claude: nothing to do).
+    ///   3. Open the new session via `Session::open`-equivalent logic.
     pub async fn swap(&mut self, new_launch: BackendLaunch) -> Result<(), SwapError> {
-        match (self, new_launch) {
-            (Session::Claude(c), BackendLaunch::Claude(l)) => {
-                c.swap(l);
-                Ok(())
+        if !self.is_idle().await {
+            return Err(SwapError::TurnActive);
+        }
+        let new_kind = new_launch.kind();
+        let cur_kind = self.kind();
+
+        if cur_kind == new_kind {
+            // Same-backend swap — original code path.
+            match (self, new_launch) {
+                (Session::Claude(c), BackendLaunch::Claude(l)) => {
+                    c.swap(l);
+                    Ok(())
+                }
+                (Session::Codex(c), BackendLaunch::Codex(l)) => {
+                    c.swap(l).await.map_err(SwapError::Spawn)
+                }
+                // Unreachable: cur_kind == new_kind guarantees matched arms.
+                _ => unreachable!("kind() agreement implies BackendLaunch variant match"),
             }
-            (Session::Codex(c), BackendLaunch::Codex(l)) => {
-                c.swap(l).await.map_err(SwapError::Spawn)
+        } else {
+            // Cross-backend swap (tier 3). Close old, then open new.
+            // We open the new session FIRST into a temp; if that fails
+            // we keep the old one intact. If it succeeds, we swap in and
+            // close the old.
+            let new_session = Self::open(new_launch).await.map_err(SwapError::Spawn)?;
+            // Replace `*self` with the new session. The old value moves
+            // into `old_session`; its Drop (Claude) or close (Codex) cleans up.
+            let old_session = std::mem::replace(self, new_session);
+            match old_session {
+                Session::Claude(_) => {
+                    // ClaudeSession has no session-level process to tear
+                    // down (per-turn-spawn). Drop is sufficient.
+                }
+                Session::Codex(c) => {
+                    // Best-effort close of the old codex app-server.
+                    // If close fails, log via the returned error from
+                    // `close`; we don't surface it because the swap
+                    // itself succeeded.
+                    let _ = c.close().await;
+                }
             }
-            (s, l) => Err(SwapError::BackendMismatch {
-                current: s.kind(),
-                target: l.kind(),
-            }),
+            Ok(())
         }
     }
 
@@ -162,6 +206,9 @@ impl Session {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SwapError {
+    /// Tier 1/2 historical variant kept for callers that need to
+    /// distinguish "would have been rejected pre-tier-3" — tier 3
+    /// no longer raises this; cross-backend swap proceeds.
     #[error(
         "cross-backend swap not supported (current: {current:?}, target: {target:?})"
     )]
@@ -169,6 +216,12 @@ pub enum SwapError {
         current: BackendKind,
         target: BackendKind,
     },
+    /// A turn is currently in flight on the live session; swap is
+    /// rejected until the channel closes (the chat REPL already
+    /// gates slash commands on this, but defense-in-depth at the
+    /// runtime layer too).
+    #[error("cannot swap: a turn is currently active")]
+    TurnActive,
     #[error(transparent)]
     Spawn(#[from] SpawnError),
 }
