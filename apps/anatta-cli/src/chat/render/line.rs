@@ -557,11 +557,22 @@ fn color(c: Color, s: &str) -> String {
 
 /// Count how many terminal rows `s` occupies given `width`. Counts each
 /// `\n` as a row break and accounts for wide lines wrapping.
+///
+/// Must strip ANSI escapes before measuring width: termimad's
+/// styled output and our own `color()` helper both wrap visible text
+/// in SGR sequences (`\x1b[…m`), and [`UnicodeWidthStr::width`] counts
+/// the bytes inside those sequences as visible characters. Without
+/// the strip, a 60-char colored line was getting reported as ~90
+/// "wide" → at terminal width 80 it counted as 2 rows instead of 1.
+/// That made [`handle_delta`]'s rewind overshoot, and the subsequent
+/// `Clear(FromCursorDown)` wiped previously-printed content (banner,
+/// tool output, prior message, etc.).
 fn count_lines(s: &str, width: u16) -> u16 {
     let w = width.max(1) as usize;
     let mut rows: u32 = 0;
     for line in s.split('\n') {
-        let display_w = UnicodeWidthStr::width(line);
+        let stripped = strip_ansi(line);
+        let display_w = UnicodeWidthStr::width(stripped.as_ref());
         let chunks = display_w.div_ceil(w).max(1);
         rows = rows.saturating_add(chunks as u32);
     }
@@ -571,6 +582,44 @@ fn count_lines(s: &str, width: u16) -> u16 {
         rows = rows.saturating_sub(1);
     }
     rows.try_into().unwrap_or(u16::MAX)
+}
+
+/// Remove ANSI escape sequences for display-width measurement.
+/// Handles the CSI form (`ESC [ params final-byte`, used by all SGR
+/// color codes) plus the bare two-char ESC form (`ESC <letter>`).
+/// Returns `Cow::Borrowed` when the input has no `ESC`, so the common
+/// no-style path is allocation-free.
+fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some(&'[') => {
+                chars.next(); // consume `[`
+                // Skip until the CSI final byte (range @–~, i.e. 0x40–0x7E).
+                for c2 in chars.by_ref() {
+                    let cb = c2 as u32;
+                    if (0x40..=0x7e).contains(&cb) {
+                        break;
+                    }
+                }
+            }
+            Some(_) => {
+                // Two-char ESC sequence (e.g. ESC =, ESC >); discard the
+                // following byte.
+                chars.next();
+            }
+            None => {} // stray ESC at end of string — drop it
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// Format tool input: prefer first two object fields with truncated values.
@@ -751,5 +800,28 @@ mod tests {
         // Wrapping: 110 chars at width 100 = 2 rows.
         let s = "x".repeat(110);
         assert_eq!(count_lines(&s, 100), 2);
+    }
+
+    #[test]
+    fn strip_ansi_handles_sgr_sequences() {
+        assert_eq!(strip_ansi("plain").as_ref(), "plain");
+        assert_eq!(strip_ansi("\x1b[38;5;14mhello\x1b[0m").as_ref(), "hello");
+        // Nested / multiple sequences in one line.
+        let s = "\x1b[1m\x1b[31mbold red\x1b[0m normal \x1b[32mgreen\x1b[0m";
+        assert_eq!(strip_ansi(s).as_ref(), "bold red normal green");
+        // Stray ESC at end is tolerated.
+        assert_eq!(strip_ansi("foo\x1b").as_ref(), "foo");
+    }
+
+    #[test]
+    fn count_lines_ignores_ansi_width_inflation() {
+        // 60 visible chars wrapped in SGR codes; raw byte width ~90.
+        // At terminal width 80 this MUST be 1 row, not 2 (which was
+        // the pre-fix behavior causing the overwrite bug).
+        let styled = format!(
+            "\x1b[38;5;14m│ \x1b[0m\x1b[38;5;14m{}\x1b[0m",
+            "x".repeat(58)
+        );
+        assert_eq!(count_lines(&styled, 80), 1);
     }
 }
