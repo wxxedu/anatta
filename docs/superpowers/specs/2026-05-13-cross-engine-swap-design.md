@@ -447,68 +447,106 @@ When transcoder encounters `assistant.message.content[].tool_use.name == "Task"`
    NOT by `tool_use_id`.** The link from tool_use_id → agentId is:
    - The meta.json file contains `{agentType, description, ...}`.
    - The parent's `tool_use.input` carries `{subagent_type, description, prompt}`.
-   - Match heuristic: pair sub-agent files to parent tool_uses by
-     (subagent_type == agentType) AND (description == description),
-     within the same segment, in declaration order.
-   - On ambiguity, fall back to absorbing all sub-agent files into the
-     view without parent-linkage and let the transcoder emit a
-     "(sub-agent transcript present but unmatched)" comment in the
-     parent's tool_result.
+   - Match heuristic: pair sub-agent files to parent tool_uses by:
+     1. Primary key: `(subagent_type == agentType) AND (description == description)`.
+     2. Tiebreaker 1: `sha256(input.prompt)` prefix == hash of the
+        sub-agent's first user message (claude's sub-agent starts with
+        the parent's prompt verbatim).
+     3. Tiebreaker 2: declaration order within the segment (left-to-right
+        across parallel Task tool_uses) matched against agent file mtime.
+     - If after all three an ambiguity persists, demote ALL the
+       ambiguous parent Task calls to "unmatched" — better to show no
+       transcript than to attach a wrong one.
 3. If no matching sub-agent file found, emit a degraded `tool_result`
    with text "(sub-agent transcript unavailable)" rather than failing
    the entire transcode.
 4. Compute `sub_view_id = view_sub_thread_id(view_id, sub_index)`.
-5. Recurse: `transcode_to(Engine::Codex, TranscodeInput { source_events_jsonl: sub_path, source_engine_session_id: <derived from tool_use_id>, ... }, view_dir.join("subagents").join(format!("{sub_view_id}.jsonl")))`.
-6. Emit `CollabAgentSpawnEnd { ..., new_thread_id: sub_view_id }` in the parent codex view.
-7. After the parent's main-rollout `CollabAgentSpawnEnd`, emit a
-   `response_item::FunctionCallOutput { call_id: <mapped>, output: <sub-agent final assistant message text> }` so codex's later
-   replay sees a tool result for the Task call.
+5. Recurse: `transcode_to(Engine::Codex, TranscodeInput { source_events_jsonl: sub_path, source_engine_session_id: <claude agentId>, ... }, view_dir.join("subagents").join(format!("{sub_view_id}.jsonl")))`.
+6. **Spike-pending shape** (aligned with §3.4): emit the Task spawn as
+   a plain `response_item::FunctionCall { call_id, name: "Task",
+   arguments: json_encode(input) }` in the parent codex view, paired
+   with a `response_item::FunctionCallOutput { call_id, output:
+   <sub-agent final assistant message text> }` carrying the sub's
+   summary. The recursive sub rollout file is still produced (so
+   future tiers / a spike-confirmed `CollabAgentSpawnEnd` path can
+   adopt it), but the parent view does **not** reference it via
+   thread_id until the spike resolves how codex represents tracked
+   sub-agent spawning on disk.
+7. (When the spike unlocks the collab form, an additional emission
+   step becomes: emit `event_msg::CollabAgentSpawnEnd { ...,
+   new_thread_id: sub_view_id }` and write any thread_spawn_edges DB
+   side-effect needed. Out of scope for tier 3 v1.)
 
 #### codex → claude
 
-When transcoder encounters `event_msg::CollabAgentSpawnEnd { new_thread_id, ... }`:
+The codex source-side sub-agent spawn shape is **spike-pending**
+(§3.4 + §10). The transcoder supports two source shapes:
 
-1. Locate sub rollout at `<source_sidecar_dir>/subagents/<new_thread_id>.jsonl`
-   (this requires absorb to have copied codex sub-rollouts into
-   sidecar/subagents/; see §absorb-sub-agent).
-2. If file missing, `TranscodeError::MissingSubAgent`.
+**Shape (i)**: a `response_item::FunctionCall { name == "Task" }` —
+the v1 fallback. In this case the parent rollout itself encodes the
+spawn as a plain function call; the sub-agent's transcript (if any)
+is stored under sidecar/subagents/ keyed by the call_id. Mapping:
+1. Locate sub rollout at `<source_sidecar_dir>/subagents/<call_id>.jsonl`
+   (claude→codex transcoder wrote it there in §3.7 step 5; native codex
+   transcripts don't currently produce this — see Shape (ii)).
+2. If file missing, emit parent `tool_use{name:"Task"}` and a
+   placeholder `tool_result{content:"(sub-agent transcript unavailable)"}`
+   (don't fail the whole transcode).
+3. Recurse if found, mark sub lines `isSidechain: true`.
+
+**Shape (ii)**: an `event_msg::CollabAgentSpawnEnd { new_thread_id }` —
+the post-spike shape, when codex actually emits this form. In this case:
+1. Look up the sub rollout via state_5.sqlite (`thread_spawn_edges`
+   joined to `threads.rollout_path`); absorb has already copied it to
+   `<source_sidecar_dir>/subagents/<new_thread_id>.jsonl`.
+2. If file missing, `TranscodeError::MissingSubAgent` (this should
+   not happen post-absorb; raising loudly catches absorb bugs).
 3. Compute `sub_view_id = view_sub_thread_id(view_id, sub_index)`.
 4. Recurse: transcode the codex sub rollout into a claude sidechain
    jsonl at `view_dir.join("sidecar/<view_id>/subagents/").join(format!("agent-{sub_view_id}.jsonl"))`. Mark every line with `isSidechain: true`.
-5. Emit the parent `tool_use{name:"Task", input:{prompt, subagent_type, description}, id: <mapped call_id>}` and a paired
-   `tool_result{tool_use_id: <same>, content: <sub-agent final agent_message>}`.
+
+Both shapes converge on emitting:
+- Parent `tool_use{name:"Task", input:{prompt, subagent_type, description}, id: <mapped call_id>}`
+- Paired `tool_result{tool_use_id: <same>, content: <sub-agent final agent_message>}`
 
 ### Codex sub-agent absorb (new step)
 
 Codex sub-agents are independent sessions. Their existence and rollout
-path are tracked in **`<CODEX_HOME>/state_5.sqlite`** — specifically two
-tables (column names verified during spike, see §10):
+path are tracked in **`<CODEX_HOME>/state_5.sqlite`**. Round-2 spike
+finding: schema is
 
-- `threads(thread_id, rollout_path, ...)` — every codex thread, including
-  sub-agent threads.
-- `thread_spawn_edges(parent_thread_id, child_thread_id, status, ...)` —
-  parent→child relation.
+- `threads(id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL, ...)` —
+  every codex thread, including sub-agent threads. **Column is `id`, not
+  `thread_id`.**
+- `thread_spawn_edges(parent_thread_id TEXT, child_thread_id TEXT,
+  status TEXT, ...)` — parent→child relation.
+
+Exact column lists are recorded in spike notes once observed.
 
 Tier 1 absorb only handles the main rollout. Tier 3 absorb extends:
 
 ```
 After absorbing main rollout for a codex segment:
-  1. Open <CODEX_HOME>/state_5.sqlite read-only.
+  1. Open <CODEX_HOME>/state_5.sqlite via sqlx with:
+       SqliteConnectOptions::new()
+           .filename("<CODEX_HOME>/state_5.sqlite")
+           .read_only(true)
+           .busy_timeout(Duration::from_secs(3))
   2. SELECT child_thread_id FROM thread_spawn_edges
        WHERE parent_thread_id = <segment.engine_session_id>.
   3. For each child:
-       SELECT rollout_path FROM threads WHERE thread_id = child.
+       SELECT rollout_path FROM threads WHERE id = child.
        Copy that rollout file → <central_segment_dir>/sidecar/subagents/<child_thread_id>.jsonl.
   4. If any child has further descendants (depth > 1), recurse.
 ```
 
 The codex_to_claude transcoder later reads this sidecar dir.
 
-**Failure mode**: if `state_5.sqlite` is locked (another codex
-process running) or the schema differs from what we expect, log a
-warning and skip sub-agent absorb for that codex segment. The main
-rollout still absorbs normally; sub-agents simply won't appear in
-later cross-engine renders.
+**Failure mode**: if `state_5.sqlite` cannot be opened (e.g., schema
+mismatch, lock timeout exceeded), log a warning naming the segment and
+skip sub-agent absorb for that codex segment. The main rollout still
+absorbs normally; sub-agents simply won't appear in later cross-engine
+renders. A future tier can add a retry-on-next-startup mechanism.
 
 ### Atomicity
 
@@ -740,7 +778,10 @@ fn apply_codex_segment(src: &Path, out: &mut impl Write) -> Result<()> {
         // round-trip to typed CodexEventKind (which is strict and would fail
         // on unknown fields claude doesn't care about).
         let val: serde_json::Value = serde_json::from_str(&line)
-            .map_err(RenderError::ParseSource)?;
+            .map_err(|e| RenderError::ParseSource {
+                line: line.to_owned(),
+                source: e,
+            })?;
         let event_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match event_type {
             "session_meta" if !first_session_meta_seen => {
@@ -757,6 +798,23 @@ fn apply_codex_segment(src: &Path, out: &mut impl Write) -> Result<()> {
         }
     }
     Ok(())
+}
+```
+
+`RenderError::ParseSource` is a new variant tier 3 adds to the
+existing `RenderError` enum (which today has `PolicyNotImplemented`,
+`WouldEmptyOverwrite`, `Io`, `Sanitize`):
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum RenderError {
+    // ... existing variants ...
+    #[error("malformed source line during render: {line}")]
+    ParseSource {
+        line: String,
+        #[source]
+        source: serde_json::Error,
+    },
 }
 ```
 
@@ -805,10 +863,10 @@ If spike shows resume only works on rollouts codex itself wrote:
   of a real rollout.
 - `BackendLaunch::Codex` uses `thread/start` (fresh) for any segment
   whose prior history contains foreign-engine segments.
-- `turn/start.input[0]` is the user prompt, but we *also* synthesize a
-  `turn/start.input` preamble item containing the bundled transcript
-  as a user-visible system message ("This conversation began on
-  [claude]; the prior transcript follows: ...").
+- `turn/start.input[0]` is the **bundled transcript preamble**
+  ("This conversation began on [claude]; the prior transcript follows:
+  ..."), and `turn/start.input[1]` is the user's actual prompt. Order
+  is consistent with the `prefix_input` shape detailed below.
 - Sub-agents are not invokable in the new codex thread; their transcripts
   are referenced as inline quoted text in the preamble.
 
@@ -982,19 +1040,64 @@ engine conversations show a `Σ` marker.
 
 ## Migration
 
-### Migration 0007 (additive + Rust backfill + final DROP)
+### Migration 0007 (additive + Rust backfill + Rust-guarded DROP)
 
-**Three separate SQL migration files, with a Rust backfill running
-between the first and third.** `sqlx::migrate!` runs SQL migrations
-strictly in order at startup; the Rust backfill executes after
-migrations and before any normal code path so an interrupted process
-can be re-launched and the backfill re-runs idempotently.
+**The migration sequence cannot be expressed as plain
+`sqlx::migrate!` because (a) `sqlx::migrate!` runs all SQL migrations
+in one pass before any application code runs, leaving no place to
+slip the Rust backfill in; (b) SQLite's `RAISE()` is valid only
+inside triggers, so a "validate-then-DROP" guard cannot be expressed
+in a plain SELECT.** Tier 3 therefore uses a dedicated `MigrationDriver`
+that orchestrates three steps:
 
-**FK pragma**: `Store::open` (crates/anatta-store/src/lib.rs:38) does
-not enable SQLite foreign keys; the `ON DELETE RESTRICT` on
-`conversation_segments.profile_id` is therefore advisory only. Before
-running the backfill, anatta either (a) enables `PRAGMA foreign_keys = ON`
-on the connection, or (b) runs an explicit precheck:
+```rust
+// crates/anatta-store/src/migrate.rs
+pub async fn run_tier3_migration(pool: &SqlitePool) -> Result<()> {
+    // Step 1: SQL additive (0007a).
+    sqlx::migrate!("./migrations").run(pool).await?;
+    //         (0007a runs as part of the normal migrate set above)
+
+    // Step 2: Rust backfill (idempotent).
+    if !backfill_already_complete(pool).await? {
+        precheck_no_orphan_profile_ids(pool).await?;
+        backfill_cross_engine(pool).await?;
+        mark_backfill_complete(pool).await?;
+    }
+
+    // Step 3: Rust-guarded destructive DROP (effectively 0007b).
+    if !drop_already_complete(pool).await? {
+        ensure_backfill_complete(pool).await?;          // refuses if step 2 didn't run
+        ensure_no_null_backend_rows(pool).await?;       // sanity check
+        execute_destructive_drop(pool).await?;          // ALTER TABLE ... DROP COLUMN
+        mark_drop_complete(pool).await?;
+    }
+    Ok(())
+}
+```
+
+`anatta_migration_state` is a small table created by 0007a to hold
+the completion markers:
+
+```sql
+CREATE TABLE IF NOT EXISTS anatta_migration_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+```
+
+**Locking**: `run_tier3_migration` acquires the global anatta migration
+lock (a file-level flock under `<anatta_home>/runtime-locks/migration.lock`)
+for the duration. Two concurrent anatta startups serialize on it.
+
+**FK pragma**: As of sqlx 0.8 (anatta's current version), `PRAGMA
+foreign_keys = ON` **is the default** for `SqliteConnectOptions`. Round-2
+review correction: we don't need to add a pragma call; the `ON DELETE
+RESTRICT` on `conversation_segments.profile_id` is enforced from the
+moment `Store::open` returns. The orphan-precheck below is kept anyway
+as a belt-and-suspenders safety: if a legacy database somehow has FK
+disabled (e.g., manual sqlite3 edits), the precheck catches it.
+
+Orphan precheck:
 
 ```sql
 SELECT cs.id, cs.profile_id
@@ -1009,15 +1112,19 @@ restore the missing profile) before retrying. This is non-destructive
 and reversible.
 
 ```sql
--- 0007a_cross_engine_additive.sql
+-- migrations/0007a_cross_engine_additive.sql (runs as part of sqlx::migrate!)
 BEGIN;
 ALTER TABLE conversation_segments ADD COLUMN backend TEXT NOT NULL DEFAULT 'claude';
 ALTER TABLE conversation_segments ADD COLUMN engine_session_id TEXT;
+CREATE TABLE IF NOT EXISTS anatta_migration_state (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 COMMIT;
 ```
 
-Rust backfill, run on startup after `sqlx::migrate!`, **before any
-other code path opens conversation rows**. Idempotent:
+Rust backfill, run on startup after sqlx migrations complete, **before
+any other code path opens conversation rows**. Idempotent:
 
 ```rust
 async fn backfill_cross_engine(store: &Store) -> Result<()> {
@@ -1044,11 +1151,8 @@ async fn backfill_cross_engine(store: &Store) -> Result<()> {
                AND cs.engine_session_id IS NULL"
     ).execute(&mut *tx).await?;
 
-    // 3. Backfill complete marker. A dedicated marker table is cheaper
-    //    than a new sqlx_migrations row.
-    sqlx::query("CREATE TABLE IF NOT EXISTS anatta_backfill_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-        .execute(&mut *tx).await?;
-    sqlx::query("INSERT OR REPLACE INTO anatta_backfill_state (key, value) VALUES ('0007_step1', 'done')")
+    // 3. Mark backfill complete.
+    sqlx::query("INSERT OR REPLACE INTO anatta_migration_state (key, value) VALUES ('0007_backfill', 'done')")
         .execute(&mut *tx).await?;
 
     tx.commit().await?;
@@ -1056,23 +1160,47 @@ async fn backfill_cross_engine(store: &Store) -> Result<()> {
 }
 ```
 
-```sql
--- 0007b_cross_engine_drop.sql: drop now-redundant conversations columns.
--- This migration's up step first verifies the backfill ran.
-BEGIN;
--- Verify backfill completed. If not, ABORT prevents the DROP from running.
-SELECT CASE
-  WHEN (SELECT COUNT(*) FROM anatta_backfill_state WHERE key = '0007_step1' AND value = 'done') = 0
-    THEN RAISE(ABORT, 'backfill 0007_step1 not complete; refusing to DROP conversations columns')
-END;
--- Also verify no segment row has a NULL backend or NULL engine_session_id where it shouldn't.
-SELECT CASE
-  WHEN (SELECT COUNT(*) FROM conversation_segments WHERE backend IS NULL) > 0
-    THEN RAISE(ABORT, 'conversation_segments rows with NULL backend exist; backfill incomplete')
-END;
-ALTER TABLE conversations DROP COLUMN backend;
-ALTER TABLE conversations DROP COLUMN session_uuid;
-COMMIT;
+Step 3 (Rust-guarded destructive DROP) executes after the backfill
+marker is set. The driver re-validates state, then runs the DROPs in a
+single transaction:
+
+```rust
+async fn execute_destructive_drop(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("ALTER TABLE conversations DROP COLUMN backend")
+        .execute(&mut *tx).await?;
+    sqlx::query("ALTER TABLE conversations DROP COLUMN session_uuid")
+        .execute(&mut *tx).await?;
+    sqlx::query("INSERT OR REPLACE INTO anatta_migration_state (key, value) VALUES ('0007_drop', 'done')")
+        .execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn ensure_backfill_complete(pool: &SqlitePool) -> Result<()> {
+    let done: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM anatta_migration_state WHERE key = '0007_backfill'"
+    ).fetch_optional(pool).await?;
+    match done.as_deref() {
+        Some((v,)) if v == "done" => Ok(()),
+        _ => Err(anatta_store::Error::MigrationBlocked(
+            "0007 backfill incomplete; refusing to drop conversations columns. \
+             Re-run anatta normally to retry the backfill."
+        )),
+    }
+}
+
+async fn ensure_no_null_backend_rows(pool: &SqlitePool) -> Result<()> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_segments WHERE backend IS NULL"
+    ).fetch_one(pool).await?;
+    if n > 0 {
+        return Err(anatta_store::Error::MigrationBlocked(
+            "conversation_segments rows with NULL backend exist; backfill incomplete"
+        ));
+    }
+    Ok(())
+}
 ```
 
 **Interrupt safety**: at any point, the migration sequence is
@@ -1256,21 +1384,41 @@ User invokes `/profile` while a streaming response is still arriving.
 command) when no turn is active. Same as tier 1's existing precondition
 in `chat/runner.rs`; tier 3 adds no new mid-turn path.
 
-If implementation surface accidentally exposes a way to swap mid-turn,
-the new constraint must be enforced at `Session::swap`:
+**Where the guard lives**: the chat REPL's existing precondition
+(slash commands only fire when no turn is active) is the primary
+guard. Tier 3 adds a defensive check at the runtime layer too, via a
+new `Session::is_idle()` accessor:
 
 ```rust
 impl Session {
-    pub async fn swap(&mut self, new_launch: BackendLaunch) -> Result<(), SwapError> {
-        if let Session::Codex(c) = self {
-            if c.has_active_turn() {
-                return Err(SwapError::TurnActive);
-            }
+    pub async fn is_idle(&self) -> bool {
+        match self {
+            Session::Claude(_) => true, // claude has no inter-turn live state
+            Session::Codex(c)  => c.is_idle().await,
         }
-        // ... rest as before
+    }
+}
+
+impl PersistentCodexSession {
+    pub async fn is_idle(&self) -> bool {
+        self.active_turn.lock().await.is_none()
+    }
+}
+
+impl Session {
+    pub async fn swap(&mut self, new_launch: BackendLaunch) -> Result<(), SwapError> {
+        if !self.is_idle().await {
+            return Err(SwapError::TurnActive);
+        }
+        // ... existing same-backend/cross-backend branches ...
     }
 }
 ```
+
+`PersistentCodexSession` already maintains `active_turn:
+Arc<Mutex<Option<ActiveTurn>>>` (see spawn/codex.rs:194-195), so
+`is_idle` is a one-liner. `Session::Claude` is per-turn-spawn — there
+is no session-level "active turn" state at all, so `is_idle = true`.
 
 ### 7. Codex segment exists but `register_codex_session` fails
 
@@ -1292,12 +1440,15 @@ prevents this in tier 1. Unchanged.
 
 ### 10a. Concurrent render of the same conversation by two anatta processes
 
-`SessionLock` (tier 1) holds for the entire chat/send session and is
-keyed by conversation name. Tier 3 takes the lock at the same point
+`SessionLock` (tier 1) is a non-blocking `try_acquire` (see
+crates/anatta-runtime/src/session_lock.rs); a second anatta opening the
+same conversation **fails fast** with `LockError::AlreadyHeld` rather
+than waiting. Tier 3 takes the lock at the same point as tier 1
 (before render, before any view-cache write). Two anatta processes
-opening the same conversation see one waiting on the lock; cache writes
-do not collide. Transcode `.tmp` paths are also keyed by the locked
-conversation's segment id and unique on disk.
+opening the same conversation see one succeed and the other refused.
+Transcode `.tmp` paths are keyed by the locked conversation's segment
+id; even if the lock were ever made blocking in the future, atomic
+rename ensures readers see only the completed view.
 
 If a third process tries to view a conversation read-only (out of scope
 for tier 3 but anticipated): cache reads are safe lock-free because
