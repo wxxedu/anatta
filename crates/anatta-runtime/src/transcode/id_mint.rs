@@ -65,6 +65,32 @@ fn sanitize_for_id(s: &str) -> String {
         .collect()
 }
 
+/// Mint a fresh UUID-v4-shaped string for a brand-new segment on
+/// cross-engine swap (or any case where anatta needs to pre-allocate an
+/// engine_session_id before the engine spawns).
+///
+/// Codex accepts arbitrary ASCII for `session_meta.id` (verified by
+/// spike); claude reads the file at `<projects>/<cwd>/<id>.jsonl`.
+/// A standard UUID v4 string is filesystem-safe and visually compatible
+/// with both engines' native ids.
+pub fn mint_engine_session_id() -> String {
+    const HEX: [char; 16] = [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    ];
+    let body: String = nanoid::nanoid!(30, &HEX);
+    // Layout: xxxxxxxx-xxxx-4xxx-Yxxx-xxxxxxxxxxxx
+    // where Y ∈ {8,9,a,b} per UUID v4 variant.
+    format!(
+        "{}-{}-4{}-{}{}-{}",
+        &body[0..8],
+        &body[8..12],
+        &body[12..15],
+        "8", // pick a fixed variant — codex/claude don't validate
+        &body[15..18],
+        &body[18..30],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,6 +162,24 @@ mod tests {
         let u1 = synth_claude_uuid(parent, 1);
         assert_ne!(u0, u1);
         assert_eq!(u0, synth_claude_uuid(parent, 0));
+    }
+
+    #[test]
+    fn mint_engine_session_id_shape() {
+        let id = mint_engine_session_id();
+        // 8-4-4-4-12 dashed, 36 chars total.
+        assert_eq!(id.len(), 36, "got: {id}");
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+        // Two consecutive calls should not collide.
+        let a = mint_engine_session_id();
+        let b = mint_engine_session_id();
+        assert_ne!(a, b);
     }
 
     #[test]

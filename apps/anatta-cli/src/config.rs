@@ -24,6 +24,13 @@ impl Config {
             PathBuf::from(home).join(".anatta")
         };
         let store = Store::open(&anatta_home).await?;
+        // Tier 3 cross-engine swap: arm + run the destructive DROP of
+        // legacy `conversations.backend` / `session_uuid` columns. The
+        // tier-3 orchestration in this crate no longer reads either
+        // column; segment.engine_session_id supplies the resume
+        // coordinate. Idempotent: a no-op after the first successful
+        // run; safe to call on every startup.
+        store.arm_destructive_drop().await?;
         Ok(Self { anatta_home, store })
     }
 }

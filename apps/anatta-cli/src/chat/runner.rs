@@ -244,17 +244,20 @@ async fn run_chat(
                             let _ = cfg.store.close_segment(&new_active.id, false).await;
                             continue;
                         }
-                        // For cross-engine swap, the new engine cannot resume against
-                        // the old backend's session id — force a fresh thread/start.
-                        let resume_id = if cross_engine {
-                            None
-                        } else {
-                            backend_session_id.clone()
-                        };
+                        // Re-fetch the just-opened new segment to pick up its
+                        // minted engine_session_id; render_for_session above
+                        // already wrote the working file at that id's path
+                        // with transcoded prior history. Resume against it.
+                        let new_active_after_render = cfg
+                            .store
+                            .get_segment(&new_active.id)
+                            .await?
+                            .expect("just opened");
+                        let resume_id = new_active_after_render.engine_session_id.clone();
                         let new_launch = match launch::build_launch(
                             &new_profile,
                             cwd.clone(),
-                            resume_id,
+                            resume_id.clone(),
                             cfg,
                         ) {
                             Ok(l) => l,
@@ -285,13 +288,12 @@ async fn run_chat(
                             eprintln!("→ swapped to profile '{}'", new_profile.id);
                         }
                         profile = new_profile;
-                        // On cross-engine swap the new segment's engine_session_id
-                        // is None, so reset our local tracker accordingly.
-                        backend_session_id = if cross_engine {
-                            None
-                        } else {
-                            backend_session_id
-                        };
+                        // The new segment now carries a pre-allocated
+                        // engine_session_id (minted in open_segment_for_swap),
+                        // and render has written the working file with
+                        // transcoded prior content under that id. Reflect
+                        // that on our local tracker.
+                        backend_session_id = resume_id;
                         // Refresh active_seg + conv_meta after render mutations.
                         if let Some(s) = cfg
                             .store

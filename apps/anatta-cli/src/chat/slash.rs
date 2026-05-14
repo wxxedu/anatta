@@ -44,7 +44,14 @@ pub(crate) async fn handle(
     let mut parts = line.split_whitespace();
     let head = parts.next().unwrap_or("");
     match head {
-        "/profile" => handle_profile(current_profile, cfg).await,
+        "/profile" => {
+            let direct = parts.next().map(str::to_owned);
+            if let Some(profile_id) = direct {
+                handle_profile_direct(current_profile, cfg, &profile_id).await
+            } else {
+                handle_profile(current_profile, cfg).await
+            }
+        }
         "/exit" | "/quit" => Ok(SlashOutcome::Exit),
         "/help" => {
             print_help();
@@ -55,6 +62,37 @@ pub(crate) async fn handle(
             Ok(SlashOutcome::Continue)
         }
     }
+}
+
+/// Non-interactive `/profile <profile_id>` variant. Resolves the id,
+/// validates it's different from the current, and returns SwapProfile
+/// without going through the picker or the confirmation dialog.
+/// Useful for scripting + integration tests.
+async fn handle_profile_direct(
+    current: &ProfileRecord,
+    cfg: &Config,
+    profile_id: &str,
+) -> Result<SlashOutcome, ChatError> {
+    let profiles = cfg.store.list_profiles().await?;
+    let Some(new_profile) = profiles.iter().find(|p| p.id == profile_id) else {
+        eprintln!("✗ profile not found: {profile_id}");
+        return Ok(SlashOutcome::Continue);
+    };
+    if new_profile.id == current.id {
+        eprintln!("already on '{}'; no change", current.id);
+        return Ok(SlashOutcome::Continue);
+    }
+    if new_profile.backend != current.backend {
+        eprintln!(
+            "→ direct swap: {} → {} (no confirmation; reasoning blocks from foreign \
+             prior segments will be dropped)",
+            current.backend.as_str(),
+            new_profile.backend.as_str(),
+        );
+    }
+    Ok(SlashOutcome::SwapProfile {
+        new_profile: Box::new(new_profile.clone()),
+    })
 }
 
 fn print_help() {

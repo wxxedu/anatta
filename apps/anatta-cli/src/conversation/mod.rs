@@ -192,8 +192,18 @@ async fn migrate_legacy_jsonl_if_needed(
     profile: &ProfileRecord,
     active_segment: &SegmentRecord,
 ) -> Result<(), OrchError> {
-    let Some(session_uuid) = conv.session_uuid.as_deref() else {
-        return Ok(());
+    // Source: prefer segment.engine_session_id (tier 3), fall back to
+    // conv.session_uuid (only populated pre-destructive-drop). After
+    // the drop, the latter is always None; the migration 0007 backfill
+    // ensured ordinal-0 segments inherited the value into
+    // engine_session_id, so we don't lose anything.
+    let session_uuid = match active_segment
+        .engine_session_id
+        .as_deref()
+        .or(conv.session_uuid.as_deref())
+    {
+        Some(s) => s,
+        None => return Ok(()),
     };
     let Some(conv_id) = conv.id.as_deref() else {
         return Ok(());
@@ -286,6 +296,13 @@ pub async fn open_segment_for_swap(
     let policy = min_policy_for(prev_family, new_family);
     let policy_json = serde_json::to_string(&policy).expect("serde");
     let seg_id = ulid::Ulid::new().to_string();
+    // Pre-allocate engine_session_id for the new segment so render can
+    // pre-populate the working file with transcoded prior history under
+    // a stable resume coordinate. Without this, render would
+    // SkippedFirstTurn and the new engine would launch a fresh thread
+    // with no context — defeating cross-engine continuity.
+    let minted_engine_session_id =
+        anatta_runtime::transcode::id_mint::mint_engine_session_id();
     cfg.store
         .insert_segment(anatta_store::segment::NewSegment {
             id: &seg_id,
@@ -295,7 +312,7 @@ pub async fn open_segment_for_swap(
             source_family: new_family.as_str(),
             transition_policy: &policy_json,
             backend: new_profile.backend.as_str(),
-            engine_session_id: None,
+            engine_session_id: Some(&minted_engine_session_id),
         })
         .await?;
     Ok(cfg

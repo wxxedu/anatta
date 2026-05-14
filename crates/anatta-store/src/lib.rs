@@ -45,6 +45,10 @@ impl Store {
             .connect_with(opts)
             .await?;
         MIGRATOR.run(&pool).await?;
+        // Tier 3 expand-only migration: backfill segments. The
+        // destructive DROP is opt-in (callers call
+        // `Store::arm_destructive_drop()` after they're confident
+        // their callers no longer read the legacy columns).
         migrate::run_tier3_post_migration(&pool).await?;
         Ok(Self { pool })
     }
@@ -59,6 +63,16 @@ impl Store {
         MIGRATOR.run(&pool).await?;
         migrate::run_tier3_post_migration(&pool).await?;
         Ok(Self { pool })
+    }
+
+    /// Arm the tier-3 destructive `ALTER TABLE conversations DROP COLUMN`
+    /// step. The next call to `Store::open` (or this method, idempotently)
+    /// will execute the drop after re-verifying preconditions
+    /// (backfill done, no NULL backend rows). Once dropped, the legacy
+    /// `conversations.backend` + `session_uuid` columns are gone.
+    pub async fn arm_destructive_drop(&self) -> Result<(), StoreError> {
+        migrate::enable_destructive_drop(&self.pool).await?;
+        migrate::run_tier3_post_migration(&self.pool).await
     }
 
     pub fn pool(&self) -> &SqlitePool {
