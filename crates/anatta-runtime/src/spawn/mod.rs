@@ -1,25 +1,26 @@
 //! Backend subprocess supervision.
 //!
-//! Each backend exposes a typed `XxxLaunch` config + an impl of
-//! [`Launchable`]. Top-level [`launch`] is a thin wrapper that delegates
-//! to the trait method.
+//! Three session shapes:
 //!
-//! ```ignore
-//! use anatta_runtime::{claude, spawn::launch};
-//! let session = launch(claude::ClaudeLaunch {
-//!     profile: claude_profile,
-//!     cwd: worktree.into(),
-//!     prompt: "do the thing".into(),
-//!     resume: None,
-//!     binary_path: claude_bin,
-//! }).await?;
-//! let id = session.session_id();
-//! while let Some(evt) = session.events().recv().await { ... }
-//! ```
+//! * `ClaudeLaunch` — per-turn `claude --print --output-format
+//!   stream-json` spawn. Cold but simple; consumed by one-shot `anatta
+//!   send`. Each turn is a fresh child reading prompt from argv,
+//!   emitting structured stream-json on stdout.
+//! * `ClaudeInteractiveLaunch` — long-lived interactive `claude` (no
+//!   `--print`) inside a PTY. Prompts written to the master with
+//!   bracketed-paste framing; structured events tailed from
+//!   `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<session-uuid>.jsonl`;
+//!   TUI render bytes discarded. Use when warm-process latency matters
+//!   more than the simplicity of `--print`.
+//! * `CodexLaunch` — codex `app-server` (JSON-RPC 2.0 over stdio).
+//!   Either one-shot (`Launchable`) or persistent
+//!   (`PersistentCodexSession`).
 //!
-//! `launch()` blocks until the first event arrives, extracting
-//! `session_id` from it (claude's `system/init`, codex's
-//! `thread.started`). The first event is also forwarded to the
+//! All three converge on the `AgentSession` / `Session` /
+//! `TurnEvents` consumer contract. `launch()` blocks until the first
+//! event arrives, extracting `session_id` from it (claude `--print`:
+//! `system/init`; claude interactive: chosen up front via `--session-id`;
+//! codex: `thread.started`). The first event is also forwarded to the
 //! consumer-facing channel — nothing is silently consumed.
 
 mod claude;
