@@ -23,6 +23,7 @@
 //! consumer-facing channel — nothing is silently consumed.
 
 mod claude;
+mod claude_interactive;
 mod codex;
 mod ids;
 pub(crate) mod pipeline;
