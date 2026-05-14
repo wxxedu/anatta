@@ -47,11 +47,19 @@ pub enum ChatCommand {
         /// Working directory the backend runs in (default: cwd).
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Force per-turn Claude session shape instead of the default
+        /// interactive PTY. No-op for Codex profiles.
+        #[arg(long)]
+        per_turn: bool,
     },
     /// Resume an existing conversation.
     Resume {
         /// Conversation name.
         name: String,
+        /// Force per-turn Claude session shape instead of the default
+        /// interactive PTY. No-op for Codex profiles.
+        #[arg(long)]
+        per_turn: bool,
     },
     /// List conversations.
     Ls,
@@ -124,8 +132,11 @@ pub async fn run(args: ChatArgs, cfg: &Config) -> Result<(), ChatError> {
             name,
             profile,
             cwd,
-        }) => runner::run_new(name, profile, cwd, cfg).await,
-        Some(ChatCommand::Resume { name }) => runner::run_resume(name, cfg).await,
+            per_turn,
+        }) => runner::run_new(name, profile, cwd, per_turn, cfg).await,
+        Some(ChatCommand::Resume { name, per_turn }) => {
+            runner::run_resume(name, per_turn, cfg).await
+        }
         Some(ChatCommand::Ls) => run_ls(cfg).await,
         Some(ChatCommand::Rm { name }) => run_rm(name, cfg).await,
     }
@@ -182,7 +193,7 @@ async fn run_interactive(cfg: &Config) -> Result<(), ChatError> {
         // "[+] New conversation"
         prompt_and_run_new(cfg).await
     } else {
-        runner::run_resume(convs[pick].name.clone(), cfg).await
+        runner::run_resume(convs[pick].name.clone(), false, cfg).await
     }
 }
 
@@ -221,7 +232,7 @@ async fn prompt_and_run_new(cfg: &Config) -> Result<(), ChatError> {
         None => return Ok(()),
     };
 
-    runner::run_new(name, profiles[pick].id.clone(), None, cfg).await
+    runner::run_new(name, profiles[pick].id.clone(), None, false, cfg).await
 }
 
 async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
