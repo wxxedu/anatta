@@ -5,9 +5,12 @@
 //! `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<session-uuid>.jsonl`,
 //! which we tail with [`HistoryProjector`](crate::claude::HistoryProjector).
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anatta_core::{
@@ -20,18 +23,19 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::claude::HistoryProjector;
 use crate::claude::history::ClaudeEvent;
-use crate::conversation::paths::working_jsonl_path;
+use crate::conversation::paths::{encode_cwd, working_jsonl_path};
 use crate::profile::ClaudeProfile;
 use crate::spawn::stderr_buf;
 use crate::spawn::{ClaudeSessionId, ExitInfo, SpawnError};
 
 const PTY_ROWS: u16 = 50;
 const PTY_COLS: u16 = 200;
-/// After spawn, sleep this long before returning from `open()` so the
-/// PTY input handler has time to be ready for bracketed-paste keystrokes
-/// from the first `send_turn`. Empirically ~200 ms is enough for claude
-/// 2.1.x on macOS; 500 ms is a defensive default.
+/// After spawn/discovery, sleep this long before returning from `open()` so
+/// the PTY input handler has time to be ready for bracketed-paste keystrokes
+/// from the first `send_turn`.
 const STARTUP_SLEEP: Duration = Duration::from_millis(500);
+const SESSION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+const SESSION_DISCOVERY_INTERVAL: Duration = Duration::from_millis(200);
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
 // ──────────────────────────────────────────────────────────────────────
@@ -151,8 +155,8 @@ pub struct ClaudeInteractiveLaunch {
     /// because we derive the JSONL path from it via `working_jsonl_path`
     /// and claude does the same canonicalization internally.
     pub cwd: PathBuf,
-    /// `Some(id)` → `--resume <id>`. `None` → fresh session; a new UUID
-    /// will be chosen at `open()` and passed via `--session-id`.
+    /// `Some(id)` → `--resume <id>`. `None` → fresh session; claude chooses
+    /// the UUID and we discover it from the newly-created session JSONL.
     pub resume: Option<ClaudeSessionId>,
     pub binary_path: PathBuf,
     pub provider: Option<crate::profile::ProviderEnv>,
@@ -179,6 +183,13 @@ pub(crate) struct ActiveTurn {
     events_tx: mpsc::Sender<AgentEvent>,
 }
 
+struct FreshSessionDiscovery {
+    profile_dir: PathBuf,
+    cwd: String,
+    project_jsonl_dir: PathBuf,
+    pre_spawn_jsonls: HashSet<String>,
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // Session
 // ──────────────────────────────────────────────────────────────────────
@@ -188,7 +199,8 @@ pub struct ClaudeInteractiveSession {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     #[allow(dead_code)] // held so resize(...) can be added later
     master: Box<dyn MasterPty + Send>,
-    session_id: ClaudeSessionId,
+    session_id: OnceLock<ClaudeSessionId>,
+    fresh_discovery: Option<FreshSessionDiscovery>,
     pty_tx: mpsc::Sender<PtyCommand>,
     active_turn: Arc<Mutex<Option<ActiveTurn>>>,
     stderr: stderr_buf::Handle,
@@ -233,12 +245,18 @@ impl ClaudeInteractiveSession {
             return Err(SpawnError::ProfilePathInvalid(launch.profile.path.clone()));
         }
 
-        // Pick session id up front so we know the JSONL path without
-        // having to discover the filename later.
-        let session_id = launch
-            .resume
-            .clone()
-            .unwrap_or_else(|| ClaudeSessionId::new(uuid::Uuid::new_v4().to_string()));
+        ensure_onboarding_complete(&launch.profile.path).await?;
+
+        let cwd_str = launch
+            .cwd
+            .to_str()
+            .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
+        let project_jsonl_dir = project_jsonl_dir(&launch.profile.path, cwd_str);
+        let pre_spawn_jsonls = if launch.resume.is_none() {
+            Some(snapshot_jsonl_stems(&project_jsonl_dir).await?)
+        } else {
+            None
+        };
 
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -264,10 +282,8 @@ impl ClaudeInteractiveSession {
             }
         }
         cmd.cwd(launch.cwd.as_os_str());
-        cmd.arg("--session-id");
-        cmd.arg(session_id.as_str());
         cmd.arg("--permission-mode");
-        cmd.arg("bypassPermissions");
+        cmd.arg("dontAsk");
         if launch.bare {
             cmd.arg("--bare");
         }
@@ -275,9 +291,9 @@ impl ClaudeInteractiveSession {
             cmd.arg("--model");
             cmd.arg(m);
         }
-        if launch.resume.is_some() {
+        if let Some(resume) = &launch.resume {
             cmd.arg("--resume");
-            cmd.arg(session_id.as_str());
+            cmd.arg(resume.as_str());
         }
 
         let child = pair
@@ -329,41 +345,45 @@ impl ClaudeInteractiveSession {
             })
             .map_err(SpawnError::Io)?;
 
-        let cwd_str = launch
-            .cwd
-            .to_str()
-            .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
-        let jsonl = working_jsonl_path(&launch.profile.path, cwd_str, session_id.as_str());
-
-        // Give claude's PTY input handler a moment to be ready for our first
-        // bracketed-paste prompt. Claude defers writing the session JSONL until
-        // the first user message, so we cannot use file presence as a readiness
-        // signal — the tail task handles "file doesn't exist yet" via retry.
-        tokio::time::sleep(STARTUP_SLEEP).await;
-
         let active_turn: Arc<Mutex<Option<ActiveTurn>>> = Arc::new(Mutex::new(None));
         let events_emitted = Arc::new(AtomicU64::new(0));
-        let stderr_handle = stderr_buf::Handle::new();
-
-        // Tail task: dispatches projected events to the currently-
-        // active turn (if any).
-        let active_for_tail = active_turn.clone();
-        let counter_for_tail = events_emitted.clone();
-        let session_id_for_tail = session_id.as_str().to_owned();
-        tokio::spawn(async move {
-            persistent_tail_loop(
+        let session_id = OnceLock::new();
+        let fresh_discovery = if let Some(resume) = launch.resume.clone() {
+            let _ = session_id.set(resume.clone());
+            let jsonl = working_jsonl_path(&launch.profile.path, cwd_str, resume.as_str());
+            let initial_tail_offset = tokio::fs::metadata(&jsonl)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            spawn_persistent_tail(
                 jsonl,
-                active_for_tail,
-                counter_for_tail,
-                session_id_for_tail,
-            )
-            .await;
-        });
+                active_turn.clone(),
+                events_emitted.clone(),
+                resume.as_str().to_owned(),
+                initial_tail_offset,
+            );
+            None
+        } else {
+            Some(FreshSessionDiscovery {
+                profile_dir: launch.profile.path.clone(),
+                cwd: cwd_str.to_owned(),
+                project_jsonl_dir,
+                pre_spawn_jsonls: pre_spawn_jsonls.unwrap_or_default(),
+            })
+        };
+
+        // Give claude's PTY input handler a moment to attach before the first
+        // bracketed-paste prompt. Fresh session-id discovery starts after that
+        // first prompt because claude 2.1.x creates the JSONL lazily.
+        tokio::time::sleep(STARTUP_SLEEP).await;
+
+        let stderr_handle = stderr_buf::Handle::new();
 
         Ok(Self {
             child,
             master: pair.master,
             session_id,
+            fresh_discovery,
             pty_tx,
             active_turn,
             stderr: stderr_handle,
@@ -372,8 +392,8 @@ impl ClaudeInteractiveSession {
         })
     }
 
-    pub fn session_id(&self) -> &str {
-        self.session_id.as_str()
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.get().map(|id| id.as_str())
     }
 
     pub async fn is_idle(&self) -> bool {
@@ -392,6 +412,18 @@ impl ClaudeInteractiveSession {
 // Persistent tail
 // ──────────────────────────────────────────────────────────────────────
 
+fn spawn_persistent_tail(
+    path: PathBuf,
+    active: Arc<Mutex<Option<ActiveTurn>>>,
+    counter: Arc<AtomicU64>,
+    session_id: String,
+    initial_byte_offset: u64,
+) {
+    tokio::spawn(async move {
+        persistent_tail_loop(path, active, counter, session_id, initial_byte_offset).await;
+    });
+}
+
 /// Like `run_tail`, but routes events to the currently-active turn (if
 /// any) instead of a single fixed channel. Closes the active turn on
 /// `AgentEventPayload::TurnCompleted`.
@@ -400,9 +432,10 @@ async fn persistent_tail_loop(
     active: Arc<Mutex<Option<ActiveTurn>>>,
     counter: Arc<AtomicU64>,
     session_id: String,
+    initial_byte_offset: u64,
 ) {
     let mut projector = HistoryProjector::new();
-    let mut byte_offset: u64 = 0;
+    let mut byte_offset: u64 = initial_byte_offset;
     let mut line_buf = String::new();
     let interval = Duration::from_millis(25);
 
@@ -478,6 +511,99 @@ async fn persistent_tail_loop(
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
 
+/// Pre-seed `<profile>/.claude.json` so claude's interactive TUI skips
+/// first-run onboarding (theme picker, etc.) that would otherwise swallow
+/// our first bracketed-paste prompt. Idempotent: only writes the keys
+/// claude needs to bypass the wizard; existing keys (credentials,
+/// theme already chosen by the user, etc.) are preserved.
+///
+/// claude reads `hasCompletedOnboarding` from `<CLAUDE_CONFIG_DIR>/.claude.json`
+/// at startup; without it the TUI lands on a theme-selection screen that
+/// captures keystrokes before reaching the chat input.
+async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError> {
+    let claude_json = profile_dir.join(".claude.json");
+    let mut config: serde_json::Value = match tokio::fs::read_to_string(&claude_json).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+        Err(e) if e.kind() == ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(SpawnError::Io(e)),
+    };
+    let obj = match config.as_object_mut() {
+        Some(o) => o,
+        None => return Ok(()), // .claude.json exists but isn't an object; leave alone
+    };
+    if obj.contains_key("hasCompletedOnboarding") {
+        return Ok(());
+    }
+    obj.insert(
+        "hasCompletedOnboarding".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    obj.entry("theme".to_string())
+        .or_insert_with(|| serde_json::Value::String("dark".to_string()));
+    let pretty = serde_json::to_string_pretty(&config).map_err(|e| {
+        SpawnError::Io(std::io::Error::other(format!("serialize claude.json: {e}")))
+    })?;
+    tokio::fs::write(&claude_json, pretty)
+        .await
+        .map_err(SpawnError::Io)
+}
+
+fn project_jsonl_dir(profile_dir: &Path, canonical_cwd: &str) -> PathBuf {
+    profile_dir.join("projects").join(encode_cwd(canonical_cwd))
+}
+
+async fn snapshot_jsonl_stems(dir: &Path) -> Result<HashSet<String>, SpawnError> {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(SpawnError::Io(e)),
+    };
+    let mut stems = HashSet::new();
+    while let Some(entry) = entries.next_entry().await.map_err(SpawnError::Io)? {
+        if !entry.file_type().await.map_err(SpawnError::Io)?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new("jsonl")) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
+            continue;
+        };
+        stems.insert(stem.to_owned());
+    }
+    Ok(stems)
+}
+
+async fn discover_new_session_id(
+    dir: &Path,
+    pre_spawn_jsonls: &HashSet<String>,
+) -> Result<ClaudeSessionId, SpawnError> {
+    let started = Instant::now();
+    loop {
+        let current = snapshot_jsonl_stems(dir).await?;
+        let mut new_stems: Vec<String> = current
+            .difference(pre_spawn_jsonls)
+            .map(ToOwned::to_owned)
+            .collect();
+        if !new_stems.is_empty() {
+            new_stems.sort();
+            return Ok(ClaudeSessionId::new(new_stems.remove(0)));
+        }
+        if started.elapsed() >= SESSION_DISCOVERY_TIMEOUT {
+            return Err(SpawnError::Io(std::io::Error::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "claude did not create a new session JSONL in {} within {:?}",
+                    dir.display(),
+                    SESSION_DISCOVERY_TIMEOUT
+                ),
+            )));
+        }
+        tokio::time::sleep(SESSION_DISCOVERY_INTERVAL).await;
+    }
+}
+
 async fn push_synthetic_session_started(
     events_tx: &mpsc::Sender<AgentEvent>,
     counter: &AtomicU64,
@@ -525,14 +651,19 @@ impl InteractiveTurnHandle {
 
 impl ClaudeInteractiveSession {
     /// Shut the session down: tell the writer thread to drop the master
-    /// (which sends SIGHUP to the child), wait up to `CLOSE_GRACE` for
-    /// natural exit, otherwise surface a timeout error. portable-pty's
-    /// `Child::wait` is sync, so we drive it on a blocking task.
+    /// after asking claude to exit, wait up to `CLOSE_GRACE` for natural
+    /// exit, otherwise fall back to closing the PTY and killing the child.
+    /// portable-pty's `Child::wait` is sync, so we drive it on a blocking
+    /// task.
     pub async fn close(self) -> Result<ExitInfo, SpawnError> {
-        let _ = self.pty_tx.send(PtyCommand::Shutdown).await;
+        let _ = self
+            .pty_tx
+            .send(PtyCommand::Write(b"/exit\r".to_vec()))
+            .await;
         let started_at = self.started_at;
         let stderr = self.stderr;
         let events_emitted = self.events_emitted;
+        let pty_tx = self.pty_tx.clone();
         let mut child = self.child;
 
         // Clone a killer *before* moving `child` into the blocking task so we
@@ -558,6 +689,7 @@ impl ClaudeInteractiveSession {
             }
             Err(_) => {
                 // Grace period expired — kill the child so it doesn't linger.
+                let _ = pty_tx.send(PtyCommand::Shutdown).await;
                 let _ = killer.kill();
                 Err(SpawnError::Io(std::io::Error::other(
                     "interactive claude did not exit within close grace",
@@ -571,6 +703,7 @@ impl ClaudeInteractiveSession {
     /// Send a new turn. Refuses if the previous turn is still active.
     pub async fn send_turn(&self, prompt: &str) -> Result<InteractiveTurnHandle, SpawnError> {
         let (events_tx, events_rx) = mpsc::channel::<AgentEvent>(64);
+        let prompt_bytes = encode_prompt(prompt);
 
         {
             let mut active = self.active_turn.lock().await;
@@ -584,21 +717,32 @@ impl ClaudeInteractiveSession {
             });
         }
 
-        if let Err(e) = push_synthetic_session_started(
-            &events_tx,
-            &self.events_emitted,
-            self.session_id.as_str(),
-            "",
-        )
-        .await
-        {
-            *self.active_turn.lock().await = None;
-            return Err(e);
+        if let Some(session_id) = self.session_id() {
+            if let Err(e) =
+                push_synthetic_session_started(&events_tx, &self.events_emitted, session_id, "")
+                    .await
+            {
+                *self.active_turn.lock().await = None;
+                return Err(e);
+            }
+
+            if self
+                .pty_tx
+                .send(PtyCommand::Write(prompt_bytes))
+                .await
+                .is_err()
+            {
+                *self.active_turn.lock().await = None;
+                return Err(SpawnError::Io(std::io::Error::other(
+                    "pty writer task gone",
+                )));
+            }
+            return Ok(InteractiveTurnHandle { events_rx });
         }
 
         if self
             .pty_tx
-            .send(PtyCommand::Write(encode_prompt(prompt)))
+            .send(PtyCommand::Write(prompt_bytes))
             .await
             .is_err()
         {
@@ -608,6 +752,82 @@ impl ClaudeInteractiveSession {
             )));
         }
 
+        let discovery = self.fresh_discovery.as_ref().ok_or_else(|| {
+            SpawnError::Io(std::io::Error::other(
+                "fresh claude session has no discovery state",
+            ))
+        })?;
+        let session_id = match discover_new_session_id(
+            &discovery.project_jsonl_dir,
+            &discovery.pre_spawn_jsonls,
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                *self.active_turn.lock().await = None;
+                return Err(e);
+            }
+        };
+        let _ = self.session_id.set(session_id.clone());
+
+        if let Err(e) = push_synthetic_session_started(
+            &events_tx,
+            &self.events_emitted,
+            session_id.as_str(),
+            "",
+        )
+        .await
+        {
+            *self.active_turn.lock().await = None;
+            return Err(e);
+        }
+
+        let jsonl = working_jsonl_path(&discovery.profile_dir, &discovery.cwd, session_id.as_str());
+        spawn_persistent_tail(
+            jsonl,
+            self.active_turn.clone(),
+            self.events_emitted.clone(),
+            session_id.as_str().to_owned(),
+            0,
+        );
+
         Ok(InteractiveTurnHandle { events_rx })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_jsonl_stems_only_records_jsonl_stems() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("old-session.jsonl"), "").unwrap();
+        std::fs::write(tmp.path().join("not-json.txt"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("sidecar.jsonl")).unwrap();
+
+        let stems = snapshot_jsonl_stems(tmp.path()).await.unwrap();
+
+        assert!(stems.contains("old-session"));
+        assert!(!stems.contains("not-json"));
+        assert!(!stems.contains("sidecar"));
+    }
+
+    #[tokio::test]
+    async fn discover_new_session_id_returns_new_jsonl_stem() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("existing.jsonl"), "").unwrap();
+        let before = snapshot_jsonl_stems(tmp.path()).await.unwrap();
+
+        let dir = tmp.path().to_owned();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            std::fs::write(dir.join("actual-session.jsonl"), "").unwrap();
+        });
+
+        let id = discover_new_session_id(tmp.path(), &before).await.unwrap();
+
+        assert_eq!(id.as_str(), "actual-session");
     }
 }

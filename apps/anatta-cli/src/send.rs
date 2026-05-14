@@ -32,12 +32,6 @@ pub struct SendArgs {
     /// pretty-printed transcript.
     #[arg(long)]
     json: bool,
-    /// Force per-turn (`--print` stream-json) Claude session shape
-    /// instead of the new default (interactive PTY). Ignored for Codex
-    /// profiles. Useful for environments where keychain access fails
-    /// from the subprocess.
-    #[arg(long)]
-    per_turn: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,7 +117,7 @@ pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
         None
     };
 
-    let launch = launch::build_launch(&record, cwd, args.resume, args.per_turn, cfg)?;
+    let launch = launch::build_launch(&record, cwd, args.resume, cfg)?;
     let mut session = Session::open(launch).await?;
     let kind = session.kind();
     if let Some(id) = session.thread_id() {
@@ -151,6 +145,13 @@ pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
     // Claude harvests its per-turn ExitInfo here; codex returns None
     // (its session-level exit comes from Session::close below).
     let per_turn_exit = turn.finalize().await?;
+    if let Some((conv_name, seg, _)) = &segment_ctx {
+        if let Some(id) = session.thread_id() {
+            orch::set_active_segment_engine_id_if_needed(cfg, conv_name, seg, id)
+                .await
+                .map_err(|e| SendError::Io(std::io::Error::other(e.to_string())))?;
+        }
+    }
     let session_exit = session.close().await?;
 
     // Tier 1: absorb new bytes into central + finalize (deletes working).
