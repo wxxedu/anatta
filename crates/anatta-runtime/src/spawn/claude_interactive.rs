@@ -161,7 +161,6 @@ pub struct ClaudeInteractiveLaunch {
 // Internal types
 // ──────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)] // variants used in Task 6 (send_turn) and Task 7 (interrupt)
 pub(crate) enum PtyCommand {
     Write(Vec<u8>),
     Shutdown,
@@ -188,7 +187,6 @@ pub struct ClaudeInteractiveSession {
     stderr: stderr_buf::Handle,
     #[allow(dead_code)] // kept for ExitInfo shape (Task 8)
     started_at: Instant,
-    #[allow(dead_code)] // used in Task 8 (ExitInfo)
     events_emitted: Arc<AtomicU64>,
 }
 
@@ -457,7 +455,6 @@ async fn persistent_tail_loop(
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 async fn push_synthetic_session_started(
     events_tx: &mpsc::Sender<AgentEvent>,
     counter: &AtomicU64,
@@ -484,4 +481,55 @@ async fn push_synthetic_session_started(
         .map_err(|_| SpawnError::Io(std::io::Error::other("consumer channel closed")))?;
     counter.fetch_add(1, Ordering::Relaxed);
     Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Turn handle
+// ──────────────────────────────────────────────────────────────────────
+
+/// Per-turn handle returned by [`ClaudeInteractiveSession::send_turn`].
+///
+/// Drain `events()` until it returns `None`; that signals end-of-turn.
+pub struct InteractiveTurnHandle {
+    events_rx: mpsc::Receiver<AgentEvent>,
+}
+
+impl InteractiveTurnHandle {
+    pub fn events(&mut self) -> &mut mpsc::Receiver<AgentEvent> {
+        &mut self.events_rx
+    }
+}
+
+impl ClaudeInteractiveSession {
+    /// Send a new turn. Refuses if the previous turn is still active.
+    pub async fn send_turn(&self, prompt: &str) -> Result<InteractiveTurnHandle, SpawnError> {
+        let (events_tx, events_rx) = mpsc::channel::<AgentEvent>(64);
+
+        {
+            let mut active = self.active_turn.lock().await;
+            if active.is_some() {
+                return Err(SpawnError::Io(std::io::Error::other(
+                    "send_turn called while previous turn still active",
+                )));
+            }
+            *active = Some(ActiveTurn {
+                events_tx: events_tx.clone(),
+            });
+        }
+
+        push_synthetic_session_started(
+            &events_tx,
+            &self.events_emitted,
+            self.session_id.as_str(),
+            "",
+        )
+        .await?;
+
+        self.pty_tx
+            .send(PtyCommand::Write(encode_prompt(prompt)))
+            .await
+            .map_err(|_| SpawnError::Io(std::io::Error::other("pty writer task gone")))?;
+
+        Ok(InteractiveTurnHandle { events_rx })
+    }
 }

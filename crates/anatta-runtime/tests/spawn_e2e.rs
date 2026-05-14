@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anatta_core::AgentEventPayload;
 use anatta_runtime::profile::{ClaudeProfile, ClaudeProfileId, CodexProfile, CodexProfileId};
-use anatta_runtime::spawn::{ClaudeLaunch, CodexLaunch, Launchable};
+use anatta_runtime::spawn::{ClaudeLaunch, ClaudeInteractiveLaunch, ClaudeInteractiveSession, CodexLaunch, Launchable};
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME"))
@@ -135,6 +135,72 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
 
     drop(cwd);
     let _ = Duration::from_secs(0); // silence unused-import lint
+}
+
+#[tokio::test]
+#[ignore = "real claude API call; requires logged-in ~/.claude"]
+async fn launch_real_claude_interactive_emits_session_started_assistant_completion() {
+    let bin = locate_binary("claude").expect("claude binary not on PATH");
+    let claude_dir = home().join(".claude");
+    assert!(claude_dir.is_dir(), "no ~/.claude found; log in via `claude /login` first");
+
+    let profile = ClaudeProfile {
+        id: ClaudeProfileId::new(),
+        path: claude_dir,
+    };
+    let cwd_tmp = tempfile::tempdir().expect("tempdir");
+    // Canonicalize: macOS resolves /tmp → /private/tmp; claude's JSONL
+    // path uses the canonical form.
+    let cwd = std::fs::canonicalize(cwd_tmp.path()).expect("canonicalize");
+
+    let launch = ClaudeInteractiveLaunch {
+        profile,
+        cwd,
+        resume: None,
+        binary_path: bin,
+        provider: None,
+        model: None,
+        bare: true,
+    };
+
+    let session = ClaudeInteractiveSession::open(launch).await.expect("open");
+    let session_id = session.session_id().to_owned();
+    eprintln!("interactive session_id = {session_id}");
+    assert!(!session_id.is_empty());
+
+    let mut turn = session
+        .send_turn("Say only OK and nothing else")
+        .await
+        .expect("send_turn");
+
+    let mut saw_session_started = false;
+    let mut saw_assistant_text = false;
+    let mut saw_turn_completed = false;
+    let mut all_text = String::new();
+    while let Some(ev) = turn.events().recv().await {
+        match &ev.payload {
+            AgentEventPayload::SessionStarted { .. } => saw_session_started = true,
+            AgentEventPayload::AssistantText { text } => {
+                saw_assistant_text = true;
+                all_text.push_str(text);
+            }
+            AgentEventPayload::TurnCompleted { .. } => saw_turn_completed = true,
+            _ => {}
+        }
+    }
+    assert!(saw_session_started, "no SessionStarted");
+    assert!(saw_assistant_text, "no AssistantText");
+    assert!(saw_turn_completed, "no TurnCompleted");
+    assert!(
+        all_text.to_ascii_lowercase().contains("ok"),
+        "expected reply containing 'OK': {all_text:?}"
+    );
+
+    let exit = session.close().await.expect("close");
+    eprintln!(
+        "interactive exit code={:?} duration={:?} events={}",
+        exit.exit_code, exit.duration, exit.events_emitted
+    );
 }
 
 #[tokio::test]
