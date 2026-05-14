@@ -9,12 +9,12 @@
 
 use std::path::PathBuf;
 
-use anatta_runtime::conversation::render_v2::{render_v2, PriorSegmentV2, RenderV2Error};
+use anatta_runtime::conversation::render_v2::{PriorSegmentV2, RenderV2Error, render_v2};
 use anatta_runtime::conversation::{
-    absorb_after_turn, AbsorbError, AbsorbInput, AbsorbOutcome, RenderError, RenderOutcome,
+    AbsorbError, AbsorbInput, AbsorbOutcome, RenderError, RenderOutcome, absorb_after_turn,
 };
 use anatta_runtime::conversation::{working_jsonl_path, working_sidecar_dir};
-use anatta_runtime::profile::{family_of, min_policy_for, BackendKind, Family};
+use anatta_runtime::profile::{BackendKind, Family, family_of, min_policy_for};
 use anatta_runtime::transcode::Engine;
 use anatta_store::conversation::ConversationMetadata;
 use anatta_store::profile::ProfileRecord;
@@ -84,18 +84,15 @@ pub fn engine_working_sidecar_dir(
         // codex sub-agents live as sibling rollout files; we don't have a single
         // "sidecar dir" the way claude does. Point at a stable empty subdir
         // so callers that mkdir it succeed harmlessly.
-        Engine::Codex => profile_dir.join("sessions").join("anatta").join(format!(
-            "rollout-{engine_session_id}.sidecar"
-        )),
+        Engine::Codex => profile_dir
+            .join("sessions")
+            .join("anatta")
+            .join(format!("rollout-{engine_session_id}.sidecar")),
     }
 }
 
 /// Per-segment central `views/` root used by the transcoder cache.
-pub fn segment_views_root(
-    anatta_home: &std::path::Path,
-    conv_id: &str,
-    seg_id: &str,
-) -> PathBuf {
+pub fn segment_views_root(anatta_home: &std::path::Path, conv_id: &str, seg_id: &str) -> PathBuf {
     anatta_home
         .join("conversations")
         .join(conv_id)
@@ -235,7 +232,10 @@ async fn migrate_legacy_jsonl_if_needed(
         anatta_runtime::conversation::working_sidecar_dir(&profile_dir, &conv.cwd, session_uuid);
     if legacy_sidecar.exists() {
         let central_sidecar = segment_sidecar_dir(&cfg.anatta_home, conv_id, &active_segment.id);
-        anatta_runtime::conversation::sidecar::copy_dir_recursive(&legacy_sidecar, &central_sidecar)?;
+        anatta_runtime::conversation::sidecar::copy_dir_recursive(
+            &legacy_sidecar,
+            &central_sidecar,
+        )?;
     }
     // Seed offsets: working file currently has `legacy_size` bytes and
     // central matches. Both `last_absorbed_bytes` and `render_initial_bytes`
@@ -301,8 +301,7 @@ pub async fn open_segment_for_swap(
     // a stable resume coordinate. Without this, render would
     // SkippedFirstTurn and the new engine would launch a fresh thread
     // with no context — defeating cross-engine continuity.
-    let minted_engine_session_id =
-        anatta_runtime::transcode::id_mint::mint_engine_session_id();
+    let minted_engine_session_id = anatta_runtime::transcode::id_mint::mint_engine_session_id();
     cfg.store
         .insert_segment(anatta_store::segment::NewSegment {
             id: &seg_id,
@@ -404,7 +403,11 @@ pub async fn render_for_session(
 
     if let RenderOutcome::Rendered { working_bytes } = outcome {
         cfg.store
-            .set_segment_offsets(active_segment_id, working_bytes as i64, Some(working_bytes as i64))
+            .set_segment_offsets(
+                active_segment_id,
+                working_bytes as i64,
+                Some(working_bytes as i64),
+            )
             .await?;
     }
     Ok(outcome)
@@ -436,7 +439,10 @@ pub async fn set_active_segment_engine_id_if_needed(
     // been dropped (post tier 3 destructive migration), the SQL fails;
     // we swallow it because the segment-side write is the new source
     // of truth.
-    let _ = cfg.store.set_session_uuid(conv_name, engine_session_id).await;
+    let _ = cfg
+        .store
+        .set_session_uuid(conv_name, engine_session_id)
+        .await;
     Ok(())
 }
 
@@ -462,18 +468,10 @@ pub async fn absorb_after_turn_for_session(
 
     let target_engine = engine_of_backend(active_segment.backend.as_str())?;
     let profile_dir = profile.path_for_runtime(cfg)?;
-    let working_jsonl = engine_working_main_path(
-        &profile_dir,
-        &conv.cwd,
-        engine_session_id,
-        target_engine,
-    );
-    let working_sidecar = engine_working_sidecar_dir(
-        &profile_dir,
-        &conv.cwd,
-        engine_session_id,
-        target_engine,
-    );
+    let working_jsonl =
+        engine_working_main_path(&profile_dir, &conv.cwd, engine_session_id, target_engine);
+    let working_sidecar =
+        engine_working_sidecar_dir(&profile_dir, &conv.cwd, engine_session_id, target_engine);
     let central_events = segment_events_path(&cfg.anatta_home, conv_id, &active_segment.id);
     let central_sidecar = segment_sidecar_dir(&cfg.anatta_home, conv_id, &active_segment.id);
 
@@ -486,7 +484,10 @@ pub async fn absorb_after_turn_for_session(
         render_initial_bytes: active_segment.render_initial_bytes as u64,
     })?;
 
-    if let AbsorbOutcome::Absorbed { new_last_absorbed, .. } = outcome {
+    if let AbsorbOutcome::Absorbed {
+        new_last_absorbed, ..
+    } = outcome
+    {
         cfg.store
             .set_segment_offsets(&active_segment.id, new_last_absorbed as i64, None)
             .await?;
@@ -519,8 +520,8 @@ async fn absorb_codex_sub_agents(
     if subs.is_empty() {
         return Ok(());
     }
-    let dest_sidecar = segment_sidecar_dir(&cfg.anatta_home, conv_id, &active_segment.id)
-        .join("subagents");
+    let dest_sidecar =
+        segment_sidecar_dir(&cfg.anatta_home, conv_id, &active_segment.id).join("subagents");
     std::fs::create_dir_all(&dest_sidecar)?;
     for s in subs {
         let dst = dest_sidecar.join(format!("{}.jsonl", s.child_thread_id));
@@ -551,25 +552,15 @@ pub async fn finalize_session(
     if let Some(engine_session_id) = active_segment.engine_session_id.as_deref() {
         let target_engine = engine_of_backend(active_segment.backend.as_str())?;
         let profile_dir = profile.path_for_runtime(cfg)?;
-        let working_jsonl = engine_working_main_path(
-            &profile_dir,
-            &conv.cwd,
-            engine_session_id,
-            target_engine,
-        );
-        let working_sidecar = engine_working_sidecar_dir(
-            &profile_dir,
-            &conv.cwd,
-            engine_session_id,
-            target_engine,
-        );
+        let working_jsonl =
+            engine_working_main_path(&profile_dir, &conv.cwd, engine_session_id, target_engine);
+        let working_sidecar =
+            engine_working_sidecar_dir(&profile_dir, &conv.cwd, engine_session_id, target_engine);
         let _ = std::fs::remove_file(&working_jsonl);
         let _ = std::fs::remove_dir_all(&working_sidecar);
     }
 
-    cfg.store
-        .reset_segment_offsets(&active_segment.id)
-        .await?;
+    cfg.store.reset_segment_offsets(&active_segment.id).await?;
     Ok(())
 }
 

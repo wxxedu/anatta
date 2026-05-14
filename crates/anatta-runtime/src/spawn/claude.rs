@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
-use super::pipeline::{spawn_with_pipeline, PipelineHandles};
+use super::pipeline::{PipelineHandles, spawn_with_pipeline};
 use super::{AgentSession, ClaudeSessionId, Launchable, SpawnError};
-use crate::claude::stream::ClaudeStreamEvent;
 use crate::claude::StreamProjector;
+use crate::claude::stream::ClaudeStreamEvent;
 use crate::profile::ClaudeProfile;
 
 /// Configuration for spawning a claude session.
@@ -54,7 +54,11 @@ impl Launchable for ClaudeLaunch {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
-            .arg("--include-partial-messages");
+            .arg("--include-partial-messages")
+            // anatta orchestrates the conversation lifecycle (segment locking,
+            // workspace, etc.); claude's interactive permission prompts are
+            // never visible in `--print` mode and stall the turn. Bypass them.
+            .arg("--dangerously-skip-permissions");
         if let Some(id) = &self.resume {
             cmd.arg("--resume").arg(id.as_str());
         }

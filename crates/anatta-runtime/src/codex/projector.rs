@@ -67,12 +67,10 @@ fn response_item(
                         payload: AgentEventPayload::AssistantText { text: text.clone() },
                     })
                 }
-                history::MessageContent::InputText { text } if role == "user" => {
-                    Some(AgentEvent {
-                        envelope: env.clone(),
-                        payload: AgentEventPayload::UserPrompt { text: text.clone() },
-                    })
-                }
+                history::MessageContent::InputText { text } if role == "user" => Some(AgentEvent {
+                    envelope: env.clone(),
+                    payload: AgentEventPayload::UserPrompt { text: text.clone() },
+                }),
                 _ => None,
             })
             .collect(),
@@ -94,7 +92,12 @@ fn response_item(
                 }]
             }
         }
-        FunctionCall { call_id, name, arguments, .. } => {
+        FunctionCall {
+            call_id,
+            name,
+            arguments,
+            ..
+        } => {
             // arguments is JSON-encoded as a string (OpenAI tool-call convention).
             let input: Value = serde_json::from_str(arguments)
                 .unwrap_or_else(|_| Value::String(arguments.clone()));
@@ -119,7 +122,12 @@ fn response_item(
                 },
             }]
         }
-        CustomToolCall { call_id, name, input, .. } => vec![AgentEvent {
+        CustomToolCall {
+            call_id,
+            name,
+            input,
+            ..
+        } => vec![AgentEvent {
             envelope: env,
             payload: AgentEventPayload::ToolUse {
                 id: call_id.clone(),
@@ -140,7 +148,11 @@ fn response_item(
             }]
         }
         WebSearchCall { action, .. } => {
-            let query = action.get("query").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            let query = action
+                .get("query")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
             vec![AgentEvent {
                 envelope: env,
                 payload: AgentEventPayload::ToolUse {
@@ -164,13 +176,19 @@ fn unpack_output(output: &Value) -> (Option<String>, Option<Value>) {
     (None, Some(output.clone()))
 }
 
-fn event_msg(msg: &history::EventMsg, ts: DateTime<Utc>, ctx: &ProjectionContext) -> Vec<AgentEvent> {
+fn event_msg(
+    msg: &history::EventMsg,
+    ts: DateTime<Utc>,
+    ctx: &ProjectionContext,
+) -> Vec<AgentEvent> {
     let env = codex_envelope(ctx.session_id.clone(), None, ts);
     use history::EventMsg::*;
     match msg {
         AgentMessage { message, .. } => vec![AgentEvent {
             envelope: env,
-            payload: AgentEventPayload::AssistantText { text: message.clone() },
+            payload: AgentEventPayload::AssistantText {
+                text: message.clone(),
+            },
         }],
         AgentReasoning { text } => vec![AgentEvent {
             envelope: env,
@@ -178,7 +196,9 @@ fn event_msg(msg: &history::EventMsg, ts: DateTime<Utc>, ctx: &ProjectionContext
         }],
         UserMessage { message, .. } => vec![AgentEvent {
             envelope: env,
-            payload: AgentEventPayload::UserPrompt { text: message.clone() },
+            payload: AgentEventPayload::UserPrompt {
+                text: message.clone(),
+            },
         }],
         TaskStarted { .. } => vec![AgentEvent {
             envelope: env,
@@ -199,9 +219,18 @@ fn event_msg(msg: &history::EventMsg, ts: DateTime<Utc>, ctx: &ProjectionContext
             },
         }],
         TokenCount { info, rate_limits } => {
-            let input = info.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output = info.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let cache_read = info.get("cached_input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let input = info
+                .get("input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output = info
+                .get("output_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let cache_read = info
+                .get("cached_input_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let mut out = vec![AgentEvent {
                 envelope: env.clone(),
                 payload: AgentEventPayload::Usage {
@@ -337,11 +366,15 @@ fn item_finalized(item: &stream::ThreadItem, ctx: &ProjectionContext) -> Vec<Age
     match &item.details {
         AgentMessage(m) => vec![AgentEvent {
             envelope: env,
-            payload: AgentEventPayload::AssistantText { text: m.text.clone() },
+            payload: AgentEventPayload::AssistantText {
+                text: m.text.clone(),
+            },
         }],
         Reasoning(r) => vec![AgentEvent {
             envelope: env,
-            payload: AgentEventPayload::Thinking { text: r.text.clone() },
+            payload: AgentEventPayload::Thinking {
+                text: r.text.clone(),
+            },
         }],
         CommandExecution(c) => {
             let success = matches!(c.status, stream::CommandExecutionStatus::Completed)
@@ -492,7 +525,12 @@ pub(crate) fn rate_limit_events_from_snapshot(
         out.push(rate_limit_event_from_window(envelope, "primary", w, status));
     }
     if let Some(w) = &snap.secondary {
-        out.push(rate_limit_event_from_window(envelope, "secondary", w, status));
+        out.push(rate_limit_event_from_window(
+            envelope,
+            "secondary",
+            w,
+            status,
+        ));
     }
     out
 }
@@ -516,7 +554,9 @@ fn rate_limit_event_from_window(
 }
 
 fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -559,12 +599,16 @@ mod tests {
         let evs = StreamProjector::new().project(&ev, &ctx());
         assert_eq!(evs.len(), 2);
         assert!(matches!(evs[0].payload, AgentEventPayload::ToolUse { .. }));
-        assert!(matches!(evs[1].payload, AgentEventPayload::ToolResult { .. }));
+        assert!(matches!(
+            evs[1].payload,
+            AgentEventPayload::ToolResult { .. }
+        ));
     }
 
     #[test]
     fn stream_item_updated_agent_message_emits_delta() {
-        let line = r#"{"type":"item.updated","item":{"id":"i","type":"agent_message","text":"hello"}}"#;
+        let line =
+            r#"{"type":"item.updated","item":{"id":"i","type":"agent_message","text":"hello"}}"#;
         let ev: stream::CodexStreamEvent = serde_json::from_str(line).unwrap();
         let evs = StreamProjector::new().project(&ev, &ctx());
         assert_eq!(evs.len(), 1);
@@ -581,7 +625,11 @@ mod tests {
         let line = r#"{"timestamp":"2026-05-10T12:00:00Z","type":"event_msg","payload":{"type":"token_count","info":{"input_tokens":100,"output_tokens":50,"cached_input_tokens":10},"rate_limits":{"primary":{"used_percent":75.5,"resets_at":1778414400},"secondary":{"used_percent":12.0},"rate_limit_reached_type":null}}}"#;
         let ev: history::CodexEvent = serde_json::from_str(line).unwrap();
         let evs = HistoryProjector::new().project(&ev, &ctx());
-        assert_eq!(evs.len(), 3, "Usage + primary RateLimit + secondary RateLimit");
+        assert_eq!(
+            evs.len(),
+            3,
+            "Usage + primary RateLimit + secondary RateLimit"
+        );
         assert!(matches!(evs[0].payload, AgentEventPayload::Usage { .. }));
         match &evs[1].payload {
             AgentEventPayload::RateLimit {
@@ -599,7 +647,11 @@ mod tests {
             _ => panic!("expected primary RateLimit"),
         }
         match &evs[2].payload {
-            AgentEventPayload::RateLimit { limit_kind, used_percent, .. } => {
+            AgentEventPayload::RateLimit {
+                limit_kind,
+                used_percent,
+                ..
+            } => {
                 assert_eq!(limit_kind, "secondary");
                 assert!((used_percent.unwrap() - 12.0).abs() < 1e-9);
             }
@@ -629,7 +681,9 @@ mod tests {
         let evs = HistoryProjector::new().project(&ev, &ctx());
         assert_eq!(evs.len(), 1);
         match &evs[0].payload {
-            AgentEventPayload::ToolUse { id, name, input, .. } => {
+            AgentEventPayload::ToolUse {
+                id, name, input, ..
+            } => {
                 assert_eq!(id, "c1");
                 assert_eq!(name, "shell");
                 assert_eq!(input.get("cmd").and_then(|v| v.as_str()), Some("ls"));

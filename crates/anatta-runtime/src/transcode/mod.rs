@@ -26,7 +26,7 @@ pub mod claude_to_codex;
 pub mod codex_to_claude;
 pub mod id_mint;
 
-pub use cache::{resolve_for_target, CacheLookup, SegmentLocation};
+pub use cache::{CacheLookup, SegmentLocation, resolve_for_target};
 
 use std::path::{Path, PathBuf};
 
@@ -116,12 +116,8 @@ pub fn transcode_to(
                 target
             )))
         }
-        (Engine::Claude, Engine::Codex) => {
-            claude_to_codex::run(input, view_dir)
-        }
-        (Engine::Codex, Engine::Claude) => {
-            codex_to_claude::run(input, view_dir)
-        }
+        (Engine::Claude, Engine::Codex) => claude_to_codex::run(input, view_dir),
+        (Engine::Codex, Engine::Claude) => codex_to_claude::run(input, view_dir),
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{create_dir_all, profile_dir, symlink_dir, ClaudeProfileId, ProfileError};
+use super::{ClaudeProfileId, ProfileError, create_dir_all, profile_dir, symlink_dir};
 
 /// A claude profile owns a directory tree:
 ///
@@ -67,11 +67,19 @@ mod tests {
         let id = ClaudeProfileId::new();
         let p = ClaudeProfile::create(id.clone(), tmp.path()).unwrap();
 
-        assert!(p.path.is_dir(), "profile dir not created: {}", p.path.display());
+        assert!(
+            p.path.is_dir(),
+            "profile dir not created: {}",
+            p.path.display()
+        );
         let projects = p.path.join("projects");
         assert!(projects.exists(), "projects/ link missing");
         assert!(
-            projects.symlink_metadata().unwrap().file_type().is_symlink(),
+            projects
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "projects/ should be a symlink"
         );
 
@@ -119,6 +127,9 @@ mod tests {
 
         let a_target = std::fs::read_link(a.path.join("projects")).unwrap();
         let b_target = std::fs::read_link(b.path.join("projects")).unwrap();
-        assert_eq!(a_target, b_target, "both profiles should share the same projects/ target");
+        assert_eq!(
+            a_target, b_target,
+            "both profiles should share the same projects/ target"
+        );
     }
 }

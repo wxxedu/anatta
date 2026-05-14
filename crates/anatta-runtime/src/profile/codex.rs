@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{create_dir_all, profile_dir, symlink_dir, CodexProfileId, ProfileError};
+use super::{CodexProfileId, ProfileError, create_dir_all, profile_dir, symlink_dir};
 
 /// A codex profile owns a directory tree:
 ///
@@ -60,7 +60,13 @@ mod tests {
 
         assert!(p.path.is_dir());
         let sessions = p.path.join("sessions");
-        assert!(sessions.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(
+            sessions
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
 
         let shared = tmp.path().join("shared").join("codex-sessions");
         assert!(shared.is_dir());

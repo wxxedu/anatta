@@ -24,6 +24,7 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 chrono      = { workspace = true }
+ulid        = { workspace = true }
 
 # chat-specific
 crossterm      = "0.29"

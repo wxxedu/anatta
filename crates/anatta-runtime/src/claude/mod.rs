@@ -15,10 +15,12 @@
 //!     `--include-partial-messages`) `stream_event`. Never persisted.
 
 pub mod history;
-pub mod stream;
 pub mod projector;
+pub mod sanitize;
+pub mod stream;
 
 pub use projector::{HistoryProjector, StreamProjector};
+pub use sanitize::{SanitizeError, strip_reasoning};
 
 #[cfg(feature = "installer")]
 mod distribution;

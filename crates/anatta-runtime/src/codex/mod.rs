@@ -13,8 +13,8 @@
 //!     `turn.completed`). Never persisted.
 
 pub mod history;
-pub mod stream;
 pub mod projector;
+pub mod stream;
 
 #[cfg(feature = "spawn")]
 pub(crate) mod app_server;

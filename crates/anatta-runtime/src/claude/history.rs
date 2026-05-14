@@ -116,7 +116,9 @@ pub struct AssistantMessage {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Thinking {
         thinking: String,
         #[serde(default)]
@@ -230,7 +232,9 @@ pub enum UserMessageContent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UserContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ToolResult {
         tool_use_id: String,
         content: ToolResultContent,
@@ -238,9 +242,13 @@ pub enum UserContentBlock {
         is_error: Option<bool>,
     },
     /// Image attachment (anthropic API `image` block).
-    Image { source: Value },
+    Image {
+        source: Value,
+    },
     /// Document attachment (anthropic API `document` block).
-    Document { source: Value },
+    Document {
+        source: Value,
+    },
 }
 
 /// `tool_result.content` is either a bare string (28k+ rows) or an array
@@ -255,10 +263,14 @@ pub enum ToolResultContent {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolResultBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     /// Reference to another tool/turn; payload shape varies.
     ToolReference(Value),
-    Image { source: Value },
+    Image {
+        source: Value,
+    },
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -395,7 +407,10 @@ pub enum AttachmentKind {
         #[serde(rename = "allowedTools")]
         allowed_tools: Vec<String>,
     },
-    EditedTextFile { filename: String, snippet: String },
+    EditedTextFile {
+        filename: String,
+        snippet: String,
+    },
     HookSuccess {
         command: String,
         content: String,
@@ -474,7 +489,9 @@ pub enum AttachmentKind {
         #[serde(rename = "reminderType")]
         reminder_type: String,
     },
-    InvokedSkills { skills: Value },
+    InvokedSkills {
+        skills: Value,
+    },
     UltrathinkEffort {
         #[serde(default)]
         level: Option<String>,
@@ -495,7 +512,10 @@ pub enum AttachmentKind {
         display_path: String,
         path: String,
     },
-    CompanionIntro { name: String, species: String },
+    CompanionIntro {
+        name: String,
+        species: String,
+    },
     HookNonBlockingError {
         command: String,
         #[serde(rename = "durationMs")]
@@ -846,7 +866,10 @@ mod tests {
         let line = r#"{"type":"ai-title","sessionId":"abc","aiTitle":"My Title"}"#;
         let ev = parse(line);
         match ev {
-            ClaudeEvent::AiTitle(AiTitleEvent { session_id, ai_title }) => {
+            ClaudeEvent::AiTitle(AiTitleEvent {
+                session_id,
+                ai_title,
+            }) => {
                 assert_eq!(session_id, "abc");
                 assert_eq!(ai_title, "My Title");
             }
@@ -856,11 +879,13 @@ mod tests {
 
     #[test]
     fn parse_permission_mode() {
-        let line = r#"{"type":"permission-mode","sessionId":"abc","permissionMode":"bypassPermissions"}"#;
+        let line =
+            r#"{"type":"permission-mode","sessionId":"abc","permissionMode":"bypassPermissions"}"#;
         let ev = parse(line);
         match ev {
             ClaudeEvent::PermissionMode(PermissionModeEvent {
-                session_id, permission_mode: PermissionModeKind::BypassPermissions,
+                session_id,
+                permission_mode: PermissionModeKind::BypassPermissions,
             }) => assert_eq!(session_id, "abc"),
             other => panic!("wrong: {other:?}"),
         }
@@ -868,11 +893,13 @@ mod tests {
 
     #[test]
     fn parse_queue_pop_all() {
-        let line = r#"{"type":"queue-operation","sessionId":"abc","timestamp":"t","operation":"popAll"}"#;
+        let line =
+            r#"{"type":"queue-operation","sessionId":"abc","timestamp":"t","operation":"popAll"}"#;
         let ev = parse(line);
         match ev {
             ClaudeEvent::QueueOperation(QueueOperationEvent {
-                operation: QueueOperationKind::PopAll, ..
+                operation: QueueOperationKind::PopAll,
+                ..
             }) => {}
             other => panic!("wrong: {other:?}"),
         }

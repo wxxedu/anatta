@@ -8,7 +8,7 @@ use std::fs;
 
 use serde_json::Value;
 
-use crate::transcode::{transcode_to, Engine, TranscodeInput};
+use crate::transcode::{Engine, TranscodeInput, transcode_to};
 
 fn write_src(tmp: &std::path::Path, lines: &[&str]) -> std::path::PathBuf {
     let p = tmp.join("source.jsonl");
@@ -30,7 +30,7 @@ fn read_view(view_dir: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
-fn payload<'a>(line: &'a Value) -> &'a Value {
+fn payload(line: &Value) -> &Value {
     line.get("payload").expect("line must have payload")
 }
 
@@ -112,7 +112,10 @@ fn user_text_becomes_message_role_user_input_text() {
     let user_line = &lines[2]; // 0=meta, 1=turn_ctx, 2=user
     assert_eq!(item_type(user_line), "response_item");
     assert_eq!(payload_type(user_line), "message");
-    assert_eq!(payload(user_line).get("role").and_then(Value::as_str), Some("user"));
+    assert_eq!(
+        payload(user_line).get("role").and_then(Value::as_str),
+        Some("user")
+    );
     let c0 = &payload(user_line).get("content").unwrap()[0];
     assert_eq!(c0.get("type").and_then(Value::as_str), Some("input_text"));
     assert_eq!(c0.get("text").and_then(Value::as_str), Some("hi"));
@@ -144,7 +147,10 @@ fn assistant_text_becomes_message_role_assistant_output_text() {
     let lines = read_view(&view);
     let asst = &lines[2];
     assert_eq!(payload_type(asst), "message");
-    assert_eq!(payload(asst).get("role").and_then(Value::as_str), Some("assistant"));
+    assert_eq!(
+        payload(asst).get("role").and_then(Value::as_str),
+        Some("assistant")
+    );
     let c0 = &payload(asst).get("content").unwrap()[0];
     assert_eq!(c0.get("type").and_then(Value::as_str), Some("output_text"));
     assert_eq!(c0.get("text").and_then(Value::as_str), Some("hello back"));
@@ -178,8 +184,14 @@ fn assistant_thinking_is_dropped() {
 
     // Read raw to make sure SIG_X never appears anywhere in the view.
     let raw = fs::read_to_string(view.join("rollout.jsonl")).unwrap();
-    assert!(!raw.contains("SIG_X"), "thinking signature must not appear in view");
-    assert!(!raw.contains("\"thinking\""), "thinking content must be dropped");
+    assert!(
+        !raw.contains("SIG_X"),
+        "thinking signature must not appear in view"
+    );
+    assert!(
+        !raw.contains("\"thinking\""),
+        "thinking content must be dropped"
+    );
     // 2 preamble + 1 user + 1 assistant text (thinking dropped)
     let lines = read_view(&view);
     assert_eq!(lines.len(), 4, "thinking-only line removed, others kept");
@@ -215,8 +227,14 @@ fn tool_use_becomes_function_call_with_namespaced_id() {
         payload(fcall).get("call_id").and_then(Value::as_str),
         Some("anatta-cc-toolu_01ABC")
     );
-    assert_eq!(payload(fcall).get("name").and_then(Value::as_str), Some("Bash"));
-    let args = payload(fcall).get("arguments").and_then(Value::as_str).unwrap();
+    assert_eq!(
+        payload(fcall).get("name").and_then(Value::as_str),
+        Some("Bash")
+    );
+    let args = payload(fcall)
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap();
     let parsed: Value = serde_json::from_str(args).unwrap();
     assert_eq!(parsed["command"], "ls");
 }
@@ -315,7 +333,11 @@ fn compact_summary_becomes_compacted_line() {
     .unwrap();
     let lines = read_view(&view);
     // 2 preamble + 1 compacted (compact_boundary was dropped, isCompactSummary user → compacted)
-    assert_eq!(lines.len(), 3, "compact_boundary suppressed, summary emitted as compacted");
+    assert_eq!(
+        lines.len(),
+        3,
+        "compact_boundary suppressed, summary emitted as compacted"
+    );
     let compacted = &lines[2];
     assert_eq!(item_type(compacted), "compacted");
     assert_eq!(
@@ -377,9 +399,15 @@ fn malformed_line_returns_parse_error() {
         &view,
     )
     .unwrap_err();
-    assert!(matches!(err, crate::transcode::TranscodeError::Parse { line: 1, .. }));
+    assert!(matches!(
+        err,
+        crate::transcode::TranscodeError::Parse { line: 1, .. }
+    ));
     // On error, view dir should not be left half-built.
-    assert!(!view.exists(), "view dir must not exist after transcode error");
+    assert!(
+        !view.exists(),
+        "view dir must not exist after transcode error"
+    );
 }
 
 #[test]
@@ -387,7 +415,9 @@ fn atomic_replace_overwrites_existing_view_dir() {
     let tmp = tempfile::tempdir().unwrap();
     let src = write_src(
         tmp.path(),
-        &[r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first"}]}}"#],
+        &[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"first"}]}}"#,
+        ],
     );
     let sidecar = tmp.path().join("sidecar");
     let view = tmp.path().join("view");
@@ -410,7 +440,9 @@ fn atomic_replace_overwrites_existing_view_dir() {
     // Second transcode with different content → view dir replaced atomically.
     let src2 = write_src(
         tmp.path(),
-        &[r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second"}]}}"#],
+        &[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"second"}]}}"#,
+        ],
     );
     transcode_to(
         Engine::Codex,

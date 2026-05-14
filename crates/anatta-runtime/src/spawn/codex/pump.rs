@@ -12,18 +12,18 @@
 //!   that turn's request id, and tears the turn down when
 //!   `turn/completed` arrives (without closing the session).
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anatta_core::AgentEvent;
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
-use crate::codex::app_server::wire::{OutgoingNotification, OutgoingRequest};
 use crate::codex::app_server::AppServerProjector;
-use crate::spawn::stderr_buf;
+use crate::codex::app_server::wire::{OutgoingNotification, OutgoingRequest};
 use crate::spawn::SpawnError;
+use crate::spawn::stderr_buf;
 
 use super::persistent::ActiveTurn;
 
@@ -34,6 +34,12 @@ use super::persistent::ActiveTurn;
 /// One-shot pump. Drains lines, projects notifications, sends events.
 /// On `turn_done_pred` returning true (i.e. turn/completed observed),
 /// closes stdin so codex exits cleanly.
+///
+/// Eight args is over clippy's default threshold but each represents a
+/// distinct stable input to the pump (reader, projector, output channel,
+/// counter, stderr buffer, completion predicate, error builder, stdin
+/// holder). Bundling into a struct would only shuffle names around.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_pump<F, E>(
     reader: &mut Lines<BufReader<ChildStdout>>,
     projector: &mut AppServerProjector,
@@ -74,10 +80,7 @@ pub(super) async fn run_pump<F, E>(
                     }
                     continue;
                 }
-                let method = value
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let params = value
                     .get("params")
                     .cloned()
@@ -145,10 +148,7 @@ pub(super) async fn persistent_reader_loop(
                     continue;
                 }
                 // Notification branch
-                let method = value
-                    .get("method")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let method = value.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let params = value
                     .get("params")
                     .cloned()
@@ -211,7 +211,10 @@ pub(super) async fn write_request<P: serde::Serialize>(
     let mut s = serde_json::to_string(&req)
         .map_err(|e| SpawnError::Io(std::io::Error::other(format!("serialize request: {e}"))))?;
     s.push('\n');
-    stdin.write_all(s.as_bytes()).await.map_err(SpawnError::Io)?;
+    stdin
+        .write_all(s.as_bytes())
+        .await
+        .map_err(SpawnError::Io)?;
     stdin.flush().await.map_err(SpawnError::Io)?;
     Ok(())
 }
@@ -223,10 +226,15 @@ pub(super) async fn write_notification<P: serde::Serialize>(
 ) -> Result<(), SpawnError> {
     let n = OutgoingNotification::new(method, params);
     let mut s = serde_json::to_string(&n).map_err(|e| {
-        SpawnError::Io(std::io::Error::other(format!("serialize notification: {e}")))
+        SpawnError::Io(std::io::Error::other(format!(
+            "serialize notification: {e}"
+        )))
     })?;
     s.push('\n');
-    stdin.write_all(s.as_bytes()).await.map_err(SpawnError::Io)?;
+    stdin
+        .write_all(s.as_bytes())
+        .await
+        .map_err(SpawnError::Io)?;
     stdin.flush().await.map_err(SpawnError::Io)?;
     Ok(())
 }

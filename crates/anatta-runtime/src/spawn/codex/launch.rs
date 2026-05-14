@@ -11,20 +11,20 @@
 //! contract.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 use anatta_core::AgentEvent;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
-use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
 use crate::codex::app_server::AppServerProjector;
+use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
 use crate::profile::CodexProfile;
 use crate::spawn::{AgentSession, CodexThreadId, Launchable, SpawnError};
 
-use super::handshake::{handshake, Handshake};
+use super::handshake::{Handshake, handshake};
 use super::pump::{make_error_event, push_synthetic_session_started, run_pump, write_request};
 use super::{APPROVAL_POLICY, FIRST_TURN_REQUEST_ID};
 
@@ -98,7 +98,7 @@ impl Launchable for CodexLaunch {
                 &counter_for_task,
                 &stderr_for_pump,
                 |method| method == "turn/completed",
-                |session_id, msg| make_error_event(session_id, msg),
+                make_error_event,
                 &mut stdin_holder,
             )
             .await;

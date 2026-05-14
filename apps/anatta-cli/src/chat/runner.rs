@@ -23,11 +23,11 @@ use anatta_store::conversation::{ConversationRecord, NewConversation};
 use anatta_store::profile::ProfileRecord;
 use tokio::sync::Notify;
 
-use super::input::{InputReader, ReadOutcome};
-use super::render::line::LineRenderer;
-use super::render::EventRenderer;
-use super::slash::{self, SlashOutcome};
 use super::ChatError;
+use super::input::{InputReader, ReadOutcome};
+use super::render::EventRenderer;
+use super::render::line::LineRenderer;
+use super::slash::{self, SlashOutcome};
 use crate::config::Config;
 use crate::conversation as orch;
 use crate::launch;
@@ -153,18 +153,15 @@ async fn run_chat(
         ))));
     }
     // Re-fetch segment row since render may have updated offsets.
-    if let Some(s) = cfg.store.active_segment(
-        conv_meta.id.as_deref().expect("conv_meta.id populated"),
-    ).await? {
+    if let Some(s) = cfg
+        .store
+        .active_segment(conv_meta.id.as_deref().expect("conv_meta.id populated"))
+        .await?
+    {
         active_seg = s;
     }
 
-    let launch = launch::build_launch(
-        &profile,
-        cwd.clone(),
-        conv.backend_session_id.clone(),
-        cfg,
-    )?;
+    let launch = launch::build_launch(&profile, cwd.clone(), conv.backend_session_id.clone(), cfg)?;
     let mut session = Session::open(launch).await?;
 
     // Persist the engine session id on first turn (claude needs the
@@ -209,9 +206,13 @@ async fn run_chat(
                         let cross_engine = new_profile.backend != profile.backend;
                         // Final absorb of old segment before close (also harvests
                         // codex sub-agents if relevant).
-                        if let Err(e) =
-                            orch::absorb_after_turn_for_session(cfg, &conv_meta, &profile, &active_seg)
-                                .await
+                        if let Err(e) = orch::absorb_after_turn_for_session(
+                            cfg,
+                            &conv_meta,
+                            &profile,
+                            &active_seg,
+                        )
+                        .await
                         {
                             eprintln!("✗ pre-swap absorb failed: {e}");
                             continue;
@@ -238,7 +239,8 @@ async fn run_chat(
                         // so render returns SkippedFirstTurn — the new engine will
                         // mint its own id on the first turn.
                         if let Err(e) =
-                            orch::render_for_session(cfg, &conv_meta, &new_profile, &new_active.id).await
+                            orch::render_for_session(cfg, &conv_meta, &new_profile, &new_active.id)
+                                .await
                         {
                             eprintln!("✗ render under new profile failed: {e}");
                             let _ = cfg.store.close_segment(&new_active.id, false).await;
@@ -302,9 +304,7 @@ async fn run_chat(
                         {
                             active_seg = s;
                         }
-                        if let Ok(Some(m)) =
-                            cfg.store.get_conversation_metadata(&conv.name).await
-                        {
+                        if let Ok(Some(m)) = cfg.store.get_conversation_metadata(&conv.name).await {
                             conv_meta = m;
                         }
                         continue;
@@ -325,7 +325,10 @@ async fn run_chat(
                 if backend_session_id.is_none() {
                     if let Some(id) = session.thread_id() {
                         orch::set_active_segment_engine_id_if_needed(
-                            cfg, &conv.name, &active_seg, id,
+                            cfg,
+                            &conv.name,
+                            &active_seg,
+                            id,
                         )
                         .await
                         .map_err(|e| ChatError::Io(std::io::Error::other(e.to_string())))?;
@@ -338,9 +341,7 @@ async fn run_chat(
                         {
                             active_seg = s;
                         }
-                        if let Ok(Some(m)) =
-                            cfg.store.get_conversation_metadata(&conv.name).await
-                        {
+                        if let Ok(Some(m)) = cfg.store.get_conversation_metadata(&conv.name).await {
                             conv_meta = m;
                         }
                     }
@@ -373,10 +374,7 @@ async fn run_chat(
     result
 }
 
-async fn drain_turn(
-    mut turn: TurnEvents,
-    renderer: &mut LineRenderer,
-) -> Result<(), ChatError> {
+async fn drain_turn(mut turn: TurnEvents, renderer: &mut LineRenderer) -> Result<(), ChatError> {
     let cancel = Arc::new(Notify::new());
     let cancel_in_task = cancel.clone();
     let ctrl_c_task = tokio::spawn(async move {

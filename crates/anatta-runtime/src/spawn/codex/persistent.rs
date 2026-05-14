@@ -14,23 +14,21 @@
 //! Closing the session ([`close`](Self::close)) writes EOF on stdin so
 //! codex shuts down cleanly and the child exits with status 0.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anatta_core::AgentEvent;
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
-use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
 use crate::codex::app_server::AppServerProjector;
-use crate::spawn::{stderr_buf, ExitInfo, SpawnError};
+use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
+use crate::spawn::{ExitInfo, SpawnError, stderr_buf};
 
-use super::handshake::{handshake, Handshake};
+use super::handshake::{Handshake, handshake};
 use super::launch::CodexLaunch;
-use super::pump::{
-    persistent_reader_loop, push_synthetic_session_started, write_request,
-};
+use super::pump::{persistent_reader_loop, push_synthetic_session_started, write_request};
 use super::{APPROVAL_POLICY, FIRST_TURN_REQUEST_ID};
 
 pub struct PersistentCodexSession {

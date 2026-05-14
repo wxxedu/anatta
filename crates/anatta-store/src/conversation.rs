@@ -222,10 +222,7 @@ impl Store {
     /// `created_at` defaults to `last_used_at`.
     ///
     /// Returns the conversation's ULID id.
-    pub async fn ensure_conversation_metadata(
-        &self,
-        name: &str,
-    ) -> Result<String, StoreError> {
+    pub async fn ensure_conversation_metadata(&self, name: &str) -> Result<String, StoreError> {
         // Read current state. Tier 3 destructive drop has removed
         // `conversations.backend` and `session_uuid`; only id +
         // created_at + last_used_at remain. The backend identity now
@@ -307,11 +304,7 @@ impl Store {
     /// only `backend_session_id` (kept for the `send --resume`
     /// reverse-lookup helper). Tier-3 callers should use
     /// `set_engine_session_id` on the active segment instead.
-    pub async fn set_session_uuid(
-        &self,
-        name: &str,
-        uuid: &str,
-    ) -> Result<(), StoreError> {
+    pub async fn set_session_uuid(&self, name: &str, uuid: &str) -> Result<(), StoreError> {
         sqlx::query!(
             r#"
             UPDATE conversations
@@ -354,10 +347,7 @@ impl Store {
     }
 
     /// Lookup name from id. Convenience for resolving lock keys.
-    pub async fn conversation_name_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<String>, StoreError> {
+    pub async fn conversation_name_by_id(&self, id: &str) -> Result<Option<String>, StoreError> {
         Ok(sqlx::query_scalar!(
             r#"SELECT name AS "name!" FROM conversations WHERE id = ?"#,
             id,
@@ -514,11 +504,12 @@ mod tests {
     async fn lookup_by_backend_session_id() {
         let s = store_with_profile().await;
         insert(&s, "foo").await;
-        assert!(s
-            .get_conversation_by_backend_session_id("sess-1")
-            .await
-            .unwrap()
-            .is_none());
+        assert!(
+            s.get_conversation_by_backend_session_id("sess-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
         s.set_backend_session_id("foo", "sess-1").await.unwrap();
         let row = s
             .get_conversation_by_backend_session_id("sess-1")

@@ -91,9 +91,9 @@ impl SessionLock {
             Err(_) => return false,
         };
         match FileExt::try_lock_shared(&file) {
-            Ok(true) => false,  // got shared → no exclusive holder
-            Ok(false) => true,  // someone holds exclusive
-            Err(_) => false,    // unknown → don't claim "held"
+            Ok(true) => false, // got shared → no exclusive holder
+            Ok(false) => true, // someone holds exclusive
+            Err(_) => false,   // unknown → don't claim "held"
         }
     }
 

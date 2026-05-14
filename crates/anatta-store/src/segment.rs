@@ -435,7 +435,10 @@ mod tests {
                 engine_session_id: None,
             })
             .await;
-        assert!(err.is_err(), "partial unique index should block two active segments");
+        assert!(
+            err.is_err(),
+            "partial unique index should block two active segments"
+        );
     }
 
     #[tokio::test]
@@ -499,7 +502,10 @@ mod tests {
             .unwrap();
 
         // Render sets both
-        store.set_segment_offsets("seg-0", 100, Some(100)).await.unwrap();
+        store
+            .set_segment_offsets("seg-0", 100, Some(100))
+            .await
+            .unwrap();
         let seg = store.active_segment("conv-1").await.unwrap().unwrap();
         assert_eq!(seg.last_absorbed_bytes, 100);
         assert_eq!(seg.render_initial_bytes, 100);

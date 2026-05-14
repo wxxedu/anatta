@@ -329,6 +329,9 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let err = read_api_key(tmp.path(), "claude-V99").unwrap_err();
-        assert!(matches!(err, AuthError::UnsupportedCredentialsVersion { .. }));
+        assert!(matches!(
+            err,
+            AuthError::UnsupportedCredentialsVersion { .. }
+        ));
     }
 }

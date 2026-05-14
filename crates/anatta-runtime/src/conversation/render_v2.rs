@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::claude::sanitize::{strip_reasoning, SanitizeError};
-use crate::profile::{min_policy_for, Family, SegmentRenderPolicy};
+use crate::claude::sanitize::{SanitizeError, strip_reasoning};
+use crate::profile::{Family, SegmentRenderPolicy, min_policy_for};
 use crate::transcode::{self, Engine, TranscodeError};
 
 use super::render::RenderOutcome;
@@ -602,7 +602,14 @@ mod tests {
             r#"{"type":"response_item","timestamp":"t","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"seg1-user"}]}}"#,
             "\n",
         );
-        let s1 = mk_seg(tmp.path(), "s1", Engine::Codex, Family::ONative, "cx1", codex_content);
+        let s1 = mk_seg(
+            tmp.path(),
+            "s1",
+            Engine::Codex,
+            Family::ONative,
+            "cx1",
+            codex_content,
+        );
         let working = tmp.path().join("out.jsonl");
         let sidecar = tmp.path().join("sidecar");
         render_v2(

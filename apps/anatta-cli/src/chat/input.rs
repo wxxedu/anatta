@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 use super::ChatError;
 
@@ -28,8 +28,7 @@ pub(crate) enum ReadOutcome {
 
 impl InputReader {
     pub(crate) fn new(anatta_home: &std::path::Path) -> Result<Self, ChatError> {
-        let mut editor = DefaultEditor::new()
-            .map_err(|e| ChatError::Readline(e.to_string()))?;
+        let mut editor = DefaultEditor::new().map_err(|e| ChatError::Readline(e.to_string()))?;
         let history_path = anatta_home.join("chat_history");
         // Best-effort load; first-run is fine.
         let _ = editor.load_history(&history_path);

@@ -14,8 +14,8 @@ use crate::codex::app_server::wire::{
     ClientInfo, InitializeParams, InitializedParams, ThreadResumeParams, ThreadStartParams,
 };
 use crate::profile::CodexProfile;
-use crate::spawn::stderr_buf;
 use crate::spawn::SpawnError;
+use crate::spawn::stderr_buf;
 
 use super::pump::{wait_for_response, write_notification, write_request};
 use super::{APPROVAL_POLICY, SANDBOX_POLICY};
