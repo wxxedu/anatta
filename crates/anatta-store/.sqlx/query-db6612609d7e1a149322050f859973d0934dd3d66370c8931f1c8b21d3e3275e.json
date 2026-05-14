@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE conversations\n               SET id = ?,\n                   created_at = COALESCE(created_at, ?)\n             WHERE name = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "db6612609d7e1a149322050f859973d0934dd3d66370c8931f1c8b21d3e3275e"
+}

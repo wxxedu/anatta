@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n            SELECT\n                id                   AS \"id!\",\n                conversation_id      AS \"conversation_id!\",\n                ordinal              AS \"ordinal!\",\n                profile_id           AS \"profile_id!\",\n                source_family        AS \"source_family!\",\n                started_at           AS \"started_at!\",\n                ended_at,\n                transition_policy    AS \"transition_policy!\",\n                ended_with_compact   AS \"ended_with_compact!\",\n                last_absorbed_bytes  AS \"last_absorbed_bytes!\",\n                render_initial_bytes AS \"render_initial_bytes!\"\n            FROM conversation_segments\n            WHERE conversation_id = ? AND ended_at IS NULL\n            ",
+  "query": "\n            SELECT\n                id                   AS \"id!\",\n                conversation_id      AS \"conversation_id!\",\n                ordinal              AS \"ordinal!\",\n                profile_id           AS \"profile_id!\",\n                source_family        AS \"source_family!\",\n                started_at           AS \"started_at!\",\n                ended_at,\n                transition_policy    AS \"transition_policy!\",\n                ended_with_compact   AS \"ended_with_compact!\",\n                last_absorbed_bytes  AS \"last_absorbed_bytes!\",\n                render_initial_bytes AS \"render_initial_bytes!\",\n                backend              AS \"backend!\",\n                engine_session_id\n            FROM conversation_segments\n            WHERE conversation_id = ?\n            ORDER BY ordinal ASC\n            ",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,16 @@
         "name": "render_initial_bytes!",
         "ordinal": 10,
         "type_info": "Integer"
+      },
+      {
+        "name": "backend!",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "engine_session_id",
+        "ordinal": 12,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -73,8 +83,10 @@
       false,
       false,
       false,
-      false
+      false,
+      false,
+      true
     ]
   },
-  "hash": "8f855220276338859f42853af67fc2d9ba869a40335d06cc819c45c1c791db39"
+  "hash": "e4c98be40803c407ec0e5a00c1c3fc832578d35fb0bbadff84771a824a298208"
 }

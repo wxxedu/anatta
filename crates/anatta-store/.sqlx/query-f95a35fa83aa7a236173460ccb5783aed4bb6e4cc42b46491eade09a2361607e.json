@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO conversation_segments (\n                id, conversation_id, ordinal, profile_id, source_family,\n                started_at, ended_at, transition_policy, ended_with_compact,\n                last_absorbed_bytes, render_initial_bytes,\n                backend, engine_session_id\n            )\n            VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, 0, 0, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "f95a35fa83aa7a236173460ccb5783aed4bb6e4cc42b46491eade09a2361607e"
+}
