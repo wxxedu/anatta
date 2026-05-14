@@ -160,7 +160,7 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
         binary_path: bin,
         provider: None,
         model: None,
-        bare: true,
+        bare: false,
     };
 
     let session = ClaudeInteractiveSession::open(launch).await.expect("open");
@@ -215,7 +215,7 @@ async fn interactive_cancel_closes_turn_channel() {
     let cwd = std::fs::canonicalize(tempfile::tempdir().unwrap().path()).unwrap();
 
     let session = ClaudeInteractiveSession::open(ClaudeInteractiveLaunch {
-        profile, cwd, resume: None, binary_path: bin, provider: None, model: None, bare: true,
+        profile, cwd, resume: None, binary_path: bin, provider: None, model: None, bare: false,
     })
     .await
     .expect("open");
