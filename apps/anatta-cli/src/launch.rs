@@ -53,11 +53,17 @@ pub fn build_launch(
     record: &ProfileRecord,
     cwd: PathBuf,
     resume: Option<String>,
+    per_turn: bool,
     cfg: &Config,
 ) -> Result<BackendLaunch, LaunchError> {
-    match record.backend {
-        BackendKind::Claude => build_claude(record, cwd, resume, cfg).map(BackendLaunch::Claude),
-        BackendKind::Codex => build_codex(record, cwd, resume, cfg).map(BackendLaunch::Codex),
+    match (record.backend, per_turn) {
+        (BackendKind::Claude, false) => build_claude_interactive(record, cwd, resume, cfg)
+            .map(BackendLaunch::ClaudeInteractive),
+        (BackendKind::Claude, true) => build_claude(record, cwd, resume, cfg)
+            .map(BackendLaunch::Claude),
+        // Codex has only one session shape; the per_turn flag is a no-op
+        // for codex profiles.
+        (BackendKind::Codex, _) => build_codex(record, cwd, resume, cfg).map(BackendLaunch::Codex),
     }
 }
 
@@ -111,7 +117,6 @@ fn build_claude(
     })
 }
 
-#[allow(dead_code)]
 fn build_claude_interactive(
     record: &ProfileRecord,
     cwd: PathBuf,
