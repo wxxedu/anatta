@@ -109,6 +109,17 @@ pub fn render_v2(
         }
 
         for seg in prior_segments {
+            // Skip segments with no central content yet — happens for the
+            // freshly-opened active segment whose first turn hasn't yet
+            // produced anything (and for closed segments whose only turn
+            // was aborted before any event hit central). Tier 1 render
+            // had the same skip; render_v2 needs it too, BEFORE the cache
+            // lookup so a missing source doesn't trigger a doomed
+            // transcode.
+            if !seg.central_events_path.exists() {
+                continue;
+            }
+
             // Ask the cache for the right input path. Same-engine → canonical;
             // cross-engine → transcoded view (possibly built on demand).
             let lookup = transcode::resolve_for_target(
@@ -156,6 +167,9 @@ pub fn render_v2(
         let mut sidecar_used = false;
         let sidecar_result: Result<(), std::io::Error> = (|| {
             for seg in prior_segments {
+                if !seg.central_events_path.exists() {
+                    continue;
+                }
                 let lookup = match transcode::resolve_for_target(
                     target_engine,
                     transcode::SegmentLocation {
@@ -525,6 +539,47 @@ mod tests {
         let first_line = body.lines().next().unwrap();
         assert!(first_line.contains("\"type\":\"system\""));
         assert!(first_line.contains("\"subtype\":\"init\""));
+    }
+
+    #[test]
+    fn segment_with_no_canonical_is_skipped_not_errored() {
+        // Reproduces the cross-engine /profile bug where the just-opened
+        // active segment (or an aborted prior segment) has no central
+        // events.jsonl yet. render_v2 must skip silently rather than
+        // letting transcode_to fail on File::open.
+        let tmp = tempfile::tempdir().unwrap();
+        // Segment row exists but its canonical events path was never created.
+        let ghost_seg_dir = tmp.path().join("segments/ghost");
+        std::fs::create_dir_all(ghost_seg_dir.join("sidecar")).unwrap();
+        std::fs::create_dir_all(ghost_seg_dir.join("views")).unwrap();
+        let ghost = PriorSegmentV2 {
+            segment_id: "ghost".to_owned(),
+            source_engine: Engine::Codex,
+            source_family: Family::ONative,
+            source_engine_session_id: "ghost-codex-id".to_owned(),
+            // points at a file that does not exist
+            central_events_path: ghost_seg_dir.join("events.jsonl"),
+            central_sidecar_dir: ghost_seg_dir.join("sidecar"),
+            views_root: ghost_seg_dir.join("views"),
+        };
+        let working = tmp.path().join("work.jsonl");
+        let sidecar = tmp.path().join("sidecar");
+        let outcome = render_v2(
+            &[ghost],
+            Engine::Claude,
+            Family::ANative,
+            Some("target-session"),
+            "/cwd",
+            &working,
+            &sidecar,
+        )
+        .unwrap();
+        // Working file exists but is empty — preamble for claude target is
+        // not emitted (claude wire has no preamble); ghost seg was skipped.
+        match outcome {
+            RenderOutcome::Rendered { working_bytes: 0 } => {}
+            other => panic!("expected Rendered{{bytes=0}}, got {other:?}"),
+        }
     }
 
     #[test]
