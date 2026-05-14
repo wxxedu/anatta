@@ -245,6 +245,8 @@ impl ClaudeInteractiveSession {
             return Err(SpawnError::ProfilePathInvalid(launch.profile.path.clone()));
         }
 
+        ensure_onboarding_complete(&launch.profile.path).await?;
+
         let cwd_str = launch
             .cwd
             .to_str()
@@ -508,6 +510,43 @@ async fn persistent_tail_loop(
 // ──────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────
+
+/// Pre-seed `<profile>/.claude.json` so claude's interactive TUI skips
+/// first-run onboarding (theme picker, etc.) that would otherwise swallow
+/// our first bracketed-paste prompt. Idempotent: only writes the keys
+/// claude needs to bypass the wizard; existing keys (credentials,
+/// theme already chosen by the user, etc.) are preserved.
+///
+/// claude reads `hasCompletedOnboarding` from `<CLAUDE_CONFIG_DIR>/.claude.json`
+/// at startup; without it the TUI lands on a theme-selection screen that
+/// captures keystrokes before reaching the chat input.
+async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError> {
+    let claude_json = profile_dir.join(".claude.json");
+    let mut config: serde_json::Value = match tokio::fs::read_to_string(&claude_json).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+        Err(e) if e.kind() == ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(SpawnError::Io(e)),
+    };
+    let obj = match config.as_object_mut() {
+        Some(o) => o,
+        None => return Ok(()), // .claude.json exists but isn't an object; leave alone
+    };
+    if obj.contains_key("hasCompletedOnboarding") {
+        return Ok(());
+    }
+    obj.insert(
+        "hasCompletedOnboarding".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    obj.entry("theme".to_string())
+        .or_insert_with(|| serde_json::Value::String("dark".to_string()));
+    let pretty = serde_json::to_string_pretty(&config).map_err(|e| {
+        SpawnError::Io(std::io::Error::other(format!("serialize claude.json: {e}")))
+    })?;
+    tokio::fs::write(&claude_json, pretty)
+        .await
+        .map_err(SpawnError::Io)
+}
 
 fn project_jsonl_dir(profile_dir: &Path, canonical_cwd: &str) -> PathBuf {
     profile_dir.join("projects").join(encode_cwd(canonical_cwd))
