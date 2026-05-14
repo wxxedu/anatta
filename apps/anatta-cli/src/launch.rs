@@ -21,7 +21,8 @@ use anatta_runtime::profile::{
     ProfileError, ProviderEnv,
 };
 use anatta_runtime::spawn::{
-    BackendLaunch, ClaudeLaunch, ClaudeSessionId, CodexLaunch, CodexThreadId,
+    BackendLaunch, ClaudeInteractiveLaunch, ClaudeLaunch, ClaudeSessionId, CodexLaunch,
+    CodexThreadId,
 };
 use anatta_store::profile::{AuthMethod, BackendKind, ProfileRecord};
 
@@ -107,6 +108,54 @@ fn build_claude(
         resume: resume.map(ClaudeSessionId::new),
         binary_path,
         provider,
+    })
+}
+
+#[allow(dead_code)]
+fn build_claude_interactive(
+    record: &ProfileRecord,
+    cwd: PathBuf,
+    resume: Option<String>,
+    cfg: &Config,
+) -> Result<ClaudeInteractiveLaunch, LaunchError> {
+    let id = ClaudeProfileId::from_string(record.id.clone())?;
+    let profile = ClaudeProfile::open(id, &cfg.anatta_home)?;
+    let binary_path = auth::locate_binary("claude").ok_or(LaunchError::BinaryNotFound("claude"))?;
+
+    let api_key = read_api_key_for(record, cfg)?;
+    let provider = match (record.auth_method, api_key) {
+        (AuthMethod::Login, _) => None,
+        (AuthMethod::ApiKey, None) => return Err(LaunchError::ApiKeyMissing(record.id.clone())),
+        (AuthMethod::ApiKey, Some(token)) => {
+            let spec = providers::lookup(&record.provider)
+                .ok_or_else(|| LaunchError::UnknownProvider(record.provider.clone()))?;
+            let overrides = Overrides {
+                base_url: record.base_url_override.clone(),
+                model: record.model_override.clone(),
+                small_fast_model: record.small_fast_model_override.clone(),
+                default_opus_model: record.default_opus_model_override.clone(),
+                default_sonnet_model: record.default_sonnet_model_override.clone(),
+                default_haiku_model: record.default_haiku_model_override.clone(),
+                subagent_model: record.subagent_model_override.clone(),
+            };
+            Some(ProviderEnv::build(spec, &overrides, token))
+        }
+    };
+
+    // `--bare` is incompatible with OAuth/keychain auth (it explicitly
+    // disables keychain reads). Use it only for ApiKey profiles, where
+    // it gives a clean predictable environment (no hooks, no LSP, no
+    // plugin sync, no CLAUDE.md auto-discovery).
+    let bare = matches!(record.auth_method, AuthMethod::ApiKey);
+
+    Ok(ClaudeInteractiveLaunch {
+        profile,
+        cwd,
+        resume: resume.map(ClaudeSessionId::new),
+        binary_path,
+        provider,
+        model: record.model_override.clone(),
+        bare,
     })
 }
 
