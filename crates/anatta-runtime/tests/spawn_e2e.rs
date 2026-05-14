@@ -9,6 +9,18 @@
 //!
 //! Run explicitly:
 //!     cargo test -p anatta-runtime --features spawn --test spawn_e2e -- --ignored --nocapture
+//!
+//! NOTE for the interactive PTY tests
+//! (`launch_real_claude_interactive_emits_session_started_assistant_completion`
+//! and `interactive_cancel_closes_turn_channel`): macOS keychain access
+//! is gated per-process, so these will fail with "Not logged in" if run
+//! from inside a Claude Code session subprocess. Run from a regular
+//! terminal:
+//!
+//! ```bash
+//! cargo test -p anatta-runtime --features spawn --test spawn_e2e -- \
+//!     --ignored --nocapture launch_real_claude_interactive interactive_cancel
+//! ```
 
 #![cfg(feature = "spawn")]
 
@@ -160,6 +172,10 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
         binary_path: bin,
         provider: None,
         model: None,
+        // OAuth-based ~/.claude profiles require keychain access, which
+        // `--bare` disables. The CLI's `build_claude_interactive` derives
+        // `bare` from `record.auth_method`; this test constructs the launch
+        // directly, so it must hard-code the OAuth-compatible value.
         bare: false,
     };
 
@@ -215,7 +231,17 @@ async fn interactive_cancel_closes_turn_channel() {
     let cwd = std::fs::canonicalize(tempfile::tempdir().unwrap().path()).unwrap();
 
     let session = ClaudeInteractiveSession::open(ClaudeInteractiveLaunch {
-        profile, cwd, resume: None, binary_path: bin, provider: None, model: None, bare: false,
+        profile,
+        cwd,
+        resume: None,
+        binary_path: bin,
+        provider: None,
+        model: None,
+        // OAuth-based ~/.claude profiles require keychain access, which
+        // `--bare` disables. The CLI's `build_claude_interactive` derives
+        // `bare` from `record.auth_method`; this test constructs the launch
+        // directly, so it must hard-code the OAuth-compatible value.
+        bare: false,
     })
     .await
     .expect("open");
