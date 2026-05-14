@@ -528,6 +528,10 @@ impl ClaudeInteractiveSession {
         let events_emitted = self.events_emitted;
         let mut child = self.child;
 
+        // Clone a killer *before* moving `child` into the blocking task so we
+        // can send SIGKILL on the timeout path without needing the child handle.
+        let mut killer = child.clone_killer();
+
         let wait_handle = tokio::task::spawn_blocking(move || child.wait());
 
         match tokio::time::timeout(CLOSE_GRACE, wait_handle).await {
@@ -545,9 +549,13 @@ impl ClaudeInteractiveSession {
                     events_emitted: events_emitted.load(Ordering::Relaxed),
                 })
             }
-            Err(_) => Err(SpawnError::Io(std::io::Error::other(
-                "interactive claude did not exit within close grace",
-            ))),
+            Err(_) => {
+                // Grace period expired — kill the child so it doesn't linger.
+                let _ = killer.kill();
+                Err(SpawnError::Io(std::io::Error::other(
+                    "interactive claude did not exit within close grace",
+                )))
+            }
         }
     }
 }
@@ -569,18 +577,27 @@ impl ClaudeInteractiveSession {
             });
         }
 
-        push_synthetic_session_started(
+        if let Err(e) = push_synthetic_session_started(
             &events_tx,
             &self.events_emitted,
             self.session_id.as_str(),
             "",
         )
-        .await?;
+        .await
+        {
+            *self.active_turn.lock().await = None;
+            return Err(e);
+        }
 
-        self.pty_tx
+        if self
+            .pty_tx
             .send(PtyCommand::Write(encode_prompt(prompt)))
             .await
-            .map_err(|_| SpawnError::Io(std::io::Error::other("pty writer task gone")))?;
+            .is_err()
+        {
+            *self.active_turn.lock().await = None;
+            return Err(SpawnError::Io(std::io::Error::other("pty writer task gone")));
+        }
 
         Ok(InteractiveTurnHandle { events_rx })
     }
