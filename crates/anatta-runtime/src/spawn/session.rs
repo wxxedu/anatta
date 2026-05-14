@@ -27,8 +27,10 @@
 use anatta_core::AgentEvent;
 
 use super::{
-    AgentSession, ClaudeLaunch, ClaudeSessionId, CodexInterruptHandle, CodexLaunch, CodexThreadId,
-    ExitInfo, Launchable, PersistentCodexSession, SpawnError, TurnHandle,
+    AgentSession, ClaudeInteractiveInterruptHandle, ClaudeInteractiveLaunch,
+    ClaudeInteractiveSession, ClaudeLaunch, ClaudeSessionId, CodexInterruptHandle, CodexLaunch,
+    CodexThreadId, ExitInfo, InteractiveTurnHandle, Launchable, PersistentCodexSession,
+    SpawnError, TurnHandle,
 };
 
 /// Which backend is on the other end. Mirrors the store's `BackendKind`
@@ -49,6 +51,7 @@ pub enum BackendKind {
 #[derive(Debug, Clone)]
 pub enum BackendLaunch {
     Claude(ClaudeLaunch),
+    ClaudeInteractive(ClaudeInteractiveLaunch),
     Codex(CodexLaunch),
 }
 
@@ -56,6 +59,7 @@ impl BackendLaunch {
     pub fn kind(&self) -> BackendKind {
         match self {
             BackendLaunch::Claude(_) => BackendKind::Claude,
+            BackendLaunch::ClaudeInteractive(_) => BackendKind::Claude,
             BackendLaunch::Codex(_) => BackendKind::Codex,
         }
     }
@@ -64,6 +68,7 @@ impl BackendLaunch {
     pub fn cwd(&self) -> &std::path::Path {
         match self {
             BackendLaunch::Claude(l) => &l.cwd,
+            BackendLaunch::ClaudeInteractive(l) => &l.cwd,
             BackendLaunch::Codex(l) => &l.cwd,
         }
     }
@@ -72,6 +77,7 @@ impl BackendLaunch {
     pub fn resume_id(&self) -> Option<&str> {
         match self {
             BackendLaunch::Claude(l) => l.resume.as_ref().map(|r| r.as_str()),
+            BackendLaunch::ClaudeInteractive(l) => l.resume.as_ref().map(|r| r.as_str()),
             BackendLaunch::Codex(l) => l.resume.as_ref().map(|r| r.as_str()),
         }
     }
@@ -83,6 +89,7 @@ impl BackendLaunch {
 /// lifetime spans the whole session.
 pub enum Session {
     Claude(ClaudeSession),
+    ClaudeInteractive(ClaudeInteractiveSession),
     Codex(CodexSession),
 }
 
@@ -90,6 +97,9 @@ impl Session {
     pub async fn open(launch: BackendLaunch) -> Result<Self, SpawnError> {
         match launch {
             BackendLaunch::Claude(l) => Ok(Session::Claude(ClaudeSession::open(l))),
+            BackendLaunch::ClaudeInteractive(l) => {
+                Ok(Session::ClaudeInteractive(ClaudeInteractiveSession::open(l).await?))
+            }
             BackendLaunch::Codex(l) => Ok(Session::Codex(CodexSession::open(l).await?)),
         }
     }
@@ -97,6 +107,7 @@ impl Session {
     pub fn kind(&self) -> BackendKind {
         match self {
             Session::Claude(_) => BackendKind::Claude,
+            Session::ClaudeInteractive(_) => BackendKind::Claude,
             Session::Codex(_) => BackendKind::Codex,
         }
     }
@@ -108,6 +119,7 @@ impl Session {
     pub async fn is_idle(&self) -> bool {
         match self {
             Session::Claude(_) => true,
+            Session::ClaudeInteractive(c) => c.is_idle().await,
             Session::Codex(c) => c.inner.is_idle().await,
         }
     }
@@ -117,6 +129,7 @@ impl Session {
     pub fn thread_id(&self) -> Option<&str> {
         match self {
             Session::Claude(c) => c.thread_id.as_ref().map(|t| t.as_str()),
+            Session::ClaudeInteractive(c) => Some(c.session_id()),
             Session::Codex(c) => Some(c.inner.thread_id()),
         }
     }
@@ -126,6 +139,14 @@ impl Session {
     pub async fn send_turn(&mut self, prompt: &str) -> Result<TurnEvents, SpawnError> {
         match self {
             Session::Claude(c) => c.send_turn(prompt).await,
+            Session::ClaudeInteractive(c) => {
+                let handle = c.send_turn(prompt).await?;
+                let interrupt = c.interrupt_handle();
+                Ok(TurnEvents {
+                    inner: TurnEventsInner::ClaudeInteractive { handle, interrupt },
+                    captured_exit: None,
+                })
+            }
             Session::Codex(c) => c.send_turn(prompt).await,
         }
     }
@@ -154,43 +175,50 @@ impl Session {
         let new_kind = new_launch.kind();
         let cur_kind = self.kind();
 
-        if cur_kind == new_kind {
-            // Same-backend swap — original code path.
-            match (self, new_launch) {
-                (Session::Claude(c), BackendLaunch::Claude(l)) => {
-                    c.swap(l);
-                    Ok(())
-                }
-                (Session::Codex(c), BackendLaunch::Codex(l)) => {
-                    c.swap(l).await.map_err(SwapError::Spawn)
-                }
-                // Unreachable: cur_kind == new_kind guarantees matched arms.
-                _ => unreachable!("kind() agreement implies BackendLaunch variant match"),
-            }
-        } else {
-            // Cross-backend swap (tier 3). Close old, then open new.
-            // We open the new session FIRST into a temp; if that fails
-            // we keep the old one intact. If it succeeds, we swap in and
-            // close the old.
-            let new_session = Self::open(new_launch).await.map_err(SwapError::Spawn)?;
-            // Replace `*self` with the new session. The old value moves
-            // into `old_session`; its Drop (Claude) or close (Codex) cleans up.
-            let old_session = std::mem::replace(self, new_session);
-            match old_session {
-                Session::Claude(_) => {
-                    // ClaudeSession has no session-level process to tear
-                    // down (per-turn-spawn). Drop is sufficient.
-                }
-                Session::Codex(c) => {
-                    // Best-effort close of the old codex app-server.
-                    // If close fails, log via the returned error from
-                    // `close`; we don't surface it because the swap
-                    // itself succeeded.
-                    let _ = c.close().await;
+        let same_shape = matches!(
+            (&*self, &new_launch),
+            (Session::Claude(_), BackendLaunch::Claude(_))
+            | (Session::ClaudeInteractive(_), BackendLaunch::ClaudeInteractive(_))
+            | (Session::Codex(_), BackendLaunch::Codex(_))
+        );
+
+        if cur_kind == new_kind && same_shape {
+            // Within-shape same-backend swap (e.g. claude → claude
+            // template replace, codex → codex re-open).
+            //
+            // For Claude and Codex we return early. For ClaudeInteractive
+            // there is no template-only swap (env is baked into the live
+            // PTY child), so we fall through to close-and-reopen below.
+            let is_claude_interactive = matches!(self, Session::ClaudeInteractive(_));
+            if !is_claude_interactive {
+                match (self, new_launch) {
+                    (Session::Claude(c), BackendLaunch::Claude(l)) => {
+                        c.swap(l);
+                        return Ok(());
+                    }
+                    (Session::Codex(c), BackendLaunch::Codex(l)) => {
+                        c.swap(l).await.map_err(SwapError::Spawn)?;
+                        return Ok(());
+                    }
+                    _ => unreachable!("same_shape match exhausted"),
                 }
             }
-            Ok(())
         }
+
+        // Cross-backend or cross-shape swap. Open new first, then close
+        // old, so a failed open leaves the existing session intact.
+        let new_session = Self::open(new_launch).await.map_err(SwapError::Spawn)?;
+        let old_session = std::mem::replace(self, new_session);
+        match old_session {
+            Session::Claude(_) => {}
+            Session::ClaudeInteractive(c) => {
+                let _ = c.close().await;
+            }
+            Session::Codex(c) => {
+                let _ = c.close().await;
+            }
+        }
+        Ok(())
     }
 
     /// Close the session and return final exit info if the backend has
@@ -199,6 +227,7 @@ impl Session {
     pub async fn close(self) -> Result<Option<ExitInfo>, SpawnError> {
         match self {
             Session::Claude(_) => Ok(None),
+            Session::ClaudeInteractive(c) => Ok(Some(c.close().await?)),
             Session::Codex(c) => Ok(Some(c.close().await?)),
         }
     }
@@ -333,6 +362,10 @@ pub struct TurnEvents {
 
 enum TurnEventsInner {
     Claude(AgentSession),
+    ClaudeInteractive {
+        handle: InteractiveTurnHandle,
+        interrupt: ClaudeInteractiveInterruptHandle,
+    },
     Codex {
         handle: TurnHandle,
         interrupt: CodexInterruptHandle,
@@ -343,6 +376,7 @@ impl TurnEvents {
     pub async fn recv(&mut self) -> Option<AgentEvent> {
         match &mut self.inner {
             TurnEventsInner::Claude(s) => s.events().recv().await,
+            TurnEventsInner::ClaudeInteractive { handle, .. } => handle.events().recv().await,
             TurnEventsInner::Codex { handle, .. } => handle.events().recv().await,
         }
     }
@@ -363,6 +397,7 @@ impl TurnEvents {
                 self.captured_exit = Some(exit);
                 Ok(())
             }
+            TurnEventsInner::ClaudeInteractive { interrupt, .. } => interrupt.interrupt().await,
             TurnEventsInner::Codex { interrupt, .. } => interrupt.interrupt().await,
         }
     }
@@ -376,6 +411,7 @@ impl TurnEvents {
         }
         match self.inner {
             TurnEventsInner::Claude(s) => Ok(Some(s.wait().await?)),
+            TurnEventsInner::ClaudeInteractive { .. } => Ok(None),
             TurnEventsInner::Codex { .. } => Ok(None),
         }
     }
