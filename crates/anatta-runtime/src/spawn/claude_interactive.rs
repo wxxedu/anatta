@@ -12,7 +12,7 @@
 /// typed — which preserves embedded newlines as literal newlines instead
 /// of treating them as submit keystrokes mid-prompt.
 pub(crate) fn encode_prompt(prompt: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(prompt.len() + 8);
+    let mut out = Vec::with_capacity(prompt.len() + 13);
     out.extend_from_slice(b"\x1b[200~");
     out.extend_from_slice(prompt.as_bytes());
     out.extend_from_slice(b"\x1b[201~");
