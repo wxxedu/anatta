@@ -45,7 +45,7 @@ pub enum BackendKind {
 /// session. The CLI builds one of these from a stored profile +
 /// credentials; the runtime takes it from there.
 ///
-/// Both variants carry a `prompt` field for symmetry with the one-shot
+/// All variants carry a `prompt` field for symmetry with the one-shot
 /// [`Launchable`] contract. For chat use, leave `prompt` empty — it is
 /// only consumed by the codex one-shot flow and otherwise ignored.
 #[derive(Debug, Clone)]
@@ -86,7 +86,9 @@ impl BackendLaunch {
 /// A live backend session that can drive many turns. Claude is
 /// stateless per turn (each [`send_turn`](Self::send_turn) spawns a
 /// fresh child); codex is a persistent `app-server` process whose
-/// lifetime spans the whole session.
+/// lifetime spans the whole session. ClaudeInteractive runs a long-lived
+/// claude TUI inside a PTY and tails its session JSONL for structured
+/// events.
 pub enum Session {
     Claude(ClaudeSession),
     ClaudeInteractive(ClaudeInteractiveSession),
