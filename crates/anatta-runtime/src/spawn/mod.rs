@@ -19,8 +19,8 @@
 //! All three converge on the `AgentSession` / `Session` /
 //! `TurnEvents` consumer contract. `launch()` blocks until the first
 //! event arrives, extracting `session_id` from it (claude `--print`:
-//! `system/init`; claude interactive: chosen up front via `--session-id`;
-//! codex: `thread.started`). The first event is also forwarded to the
+//! `system/init`; claude interactive: discovered from the session JSONL
+//! filename after Claude creates it; codex: `thread.started`). The first event is also forwarded to the
 //! consumer-facing channel — nothing is silently consumed.
 
 mod claude;

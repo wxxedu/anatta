@@ -126,12 +126,13 @@ impl Session {
         }
     }
 
-    /// Claude session UUID or codex thread UUID. For claude this is
-    /// `None` until the first turn has produced a `system/init`.
+    /// Claude session UUID or codex thread UUID. For per-turn claude and
+    /// fresh interactive claude this is `None` until the first turn has
+    /// produced or discovered the backend session id.
     pub fn thread_id(&self) -> Option<&str> {
         match self {
             Session::Claude(c) => c.thread_id.as_ref().map(|t| t.as_str()),
-            Session::ClaudeInteractive(c) => Some(c.session_id()),
+            Session::ClaudeInteractive(c) => c.session_id(),
             Session::Codex(c) => Some(c.inner.thread_id()),
         }
     }

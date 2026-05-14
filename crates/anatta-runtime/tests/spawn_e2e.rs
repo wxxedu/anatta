@@ -186,9 +186,10 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
     };
 
     let session = ClaudeInteractiveSession::open(launch).await.expect("open");
-    let session_id = session.session_id().to_owned();
-    eprintln!("interactive session_id = {session_id}");
-    assert!(!session_id.is_empty());
+    assert!(
+        session.session_id().is_none(),
+        "fresh interactive session id is discovered after first prompt"
+    );
 
     let mut turn = session
         .send_turn("Say only OK and nothing else")
@@ -217,6 +218,9 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
         all_text.to_ascii_lowercase().contains("ok"),
         "expected reply containing 'OK': {all_text:?}"
     );
+    let session_id = session.session_id().expect("discovered session id");
+    eprintln!("interactive session_id = {session_id}");
+    assert!(!session_id.is_empty());
 
     let exit = session.close().await.expect("close");
     eprintln!(
