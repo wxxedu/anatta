@@ -196,12 +196,11 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
         "expected reply containing 'OK': {all_text:?}"
     );
 
-    // TODO: Task 8 will add session.close()
-    // let exit = session.close().await.expect("close");
-    // eprintln!(
-    //     "interactive exit code={:?} duration={:?} events={}",
-    //     exit.exit_code, exit.duration, exit.events_emitted
-    // );
+    let exit = session.close().await.expect("close");
+    eprintln!(
+        "interactive exit code={:?} duration={:?} events={}",
+        exit.exit_code, exit.duration, exit.events_emitted
+    );
 }
 
 #[tokio::test]
