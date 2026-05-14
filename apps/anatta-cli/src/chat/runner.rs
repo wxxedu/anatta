@@ -29,6 +29,7 @@ use super::render::EventRenderer;
 use super::slash::{self, SlashOutcome};
 use super::ChatError;
 use crate::config::Config;
+use crate::conversation as orch;
 use crate::launch;
 
 pub(crate) async fn run_new(
@@ -50,6 +51,10 @@ pub(crate) async fn run_new(
         Some(p) => p,
         None => std::env::current_dir()?,
     };
+    // Canonicalize so the encoded path matches what claude expects
+    // (macOS /tmp → /private/tmp). conversation.cwd is immutable
+    // afterwards, so we want the canonical form persisted.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let cwd_str = cwd
         .to_str()
         .ok_or_else(|| {
@@ -127,6 +132,33 @@ async fn run_chat(
     let cwd = PathBuf::from(&conv.cwd);
     let mut profile = profile;
 
+    // Tier 1: ensure conversation has a ULID id + an active segment.
+    // For legacy conversations (predating migration 0006), this
+    // backfills the metadata and creates segment 0.
+    let mut active_seg = orch::ensure_active_segment(cfg, &conv.name, &profile)
+        .await
+        .map_err(|e| ChatError::Io(std::io::Error::other(e.to_string())))?;
+    let mut conv_meta = cfg
+        .store
+        .get_conversation_metadata(&conv.name)
+        .await?
+        .ok_or_else(|| ChatError::NotFound(conv.name.clone()))?;
+
+    // Render the working file from central if we already have a
+    // session_uuid (i.e., this is not the first turn). For first-turn
+    // conversations, session_uuid is NULL → render is a no-op.
+    if let Err(e) = orch::render_for_session(cfg, &conv_meta, &profile, &active_seg.id).await {
+        return Err(ChatError::Io(std::io::Error::other(format!(
+            "render failed: {e}"
+        ))));
+    }
+    // Re-fetch segment row since render may have updated offsets.
+    if let Some(s) = cfg.store.active_segment(
+        conv_meta.id.as_deref().expect("conv_meta.id populated"),
+    ).await? {
+        active_seg = s;
+    }
+
     let launch = launch::build_launch(
         &profile,
         cwd.clone(),
@@ -135,14 +167,29 @@ async fn run_chat(
     )?;
     let mut session = Session::open(launch).await?;
 
-    // Persist the thread id on first turn (claude needs the system/init
-    // event to capture it; codex gets it from thread/start). For codex
-    // it's already known at open time.
-    let mut backend_session_id = conv.backend_session_id.clone();
+    // Persist the engine session id on first turn (claude needs the
+    // system/init event to capture it; codex gets it from thread/start).
+    // For codex it's already known at open time. Tier 3: id lives on
+    // the active segment row (with a back-compat write to
+    // conversations.session_uuid too).
+    let mut backend_session_id = active_seg.engine_session_id.clone();
     if backend_session_id.is_none() {
         if let Some(id) = session.thread_id() {
-            cfg.store.set_backend_session_id(&conv.name, id).await?;
+            orch::set_active_segment_engine_id_if_needed(cfg, &conv.name, &active_seg, id)
+                .await
+                .map_err(|e| ChatError::Io(std::io::Error::other(e.to_string())))?;
             backend_session_id = Some(id.to_owned());
+            // Refresh local segment + metadata snapshots.
+            if let Some(s) = cfg
+                .store
+                .active_segment(conv_meta.id.as_deref().expect("id"))
+                .await?
+            {
+                active_seg = s;
+            }
+            if let Ok(Some(m)) = cfg.store.get_conversation_metadata(&conv.name).await {
+                conv_meta = m;
+            }
         }
     }
 
@@ -159,10 +206,55 @@ async fn run_chat(
                     Ok(SlashOutcome::Exit) => break Err(ChatError::InputClosed),
                     Ok(SlashOutcome::SwapProfile { new_profile }) => {
                         let new_profile = *new_profile;
+                        let cross_engine = new_profile.backend != profile.backend;
+                        // Final absorb of old segment before close (also harvests
+                        // codex sub-agents if relevant).
+                        if let Err(e) =
+                            orch::absorb_after_turn_for_session(cfg, &conv_meta, &profile, &active_seg)
+                                .await
+                        {
+                            eprintln!("✗ pre-swap absorb failed: {e}");
+                            continue;
+                        }
+                        // Open new segment row with family-aware transition policy
+                        // + the new backend.
+                        let new_active = match orch::open_segment_for_swap(
+                            cfg,
+                            &conv.name,
+                            &new_profile,
+                            /* ended_with_compact */ false,
+                        )
+                        .await
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("✗ open new segment failed: {e}");
+                                continue;
+                            }
+                        };
+                        // Render under new profile. For cross-engine the foreign
+                        // prior segments are routed through the transcoder cache.
+                        // engine_session_id on the new segment is NULL at this point,
+                        // so render returns SkippedFirstTurn — the new engine will
+                        // mint its own id on the first turn.
+                        if let Err(e) =
+                            orch::render_for_session(cfg, &conv_meta, &new_profile, &new_active.id).await
+                        {
+                            eprintln!("✗ render under new profile failed: {e}");
+                            let _ = cfg.store.close_segment(&new_active.id, false).await;
+                            continue;
+                        }
+                        // For cross-engine swap, the new engine cannot resume against
+                        // the old backend's session id — force a fresh thread/start.
+                        let resume_id = if cross_engine {
+                            None
+                        } else {
+                            backend_session_id.clone()
+                        };
                         let new_launch = match launch::build_launch(
                             &new_profile,
                             cwd.clone(),
-                            backend_session_id.clone(),
+                            resume_id,
                             cfg,
                         ) {
                             Ok(l) => l,
@@ -182,8 +274,37 @@ async fn run_chat(
                         {
                             break Err(e.into());
                         }
-                        eprintln!("→ swapped to profile '{}'", new_profile.id);
+                        if cross_engine {
+                            eprintln!(
+                                "→ swapped engine: {} → {} (profile '{}')",
+                                profile.backend.as_str(),
+                                new_profile.backend.as_str(),
+                                new_profile.id
+                            );
+                        } else {
+                            eprintln!("→ swapped to profile '{}'", new_profile.id);
+                        }
                         profile = new_profile;
+                        // On cross-engine swap the new segment's engine_session_id
+                        // is None, so reset our local tracker accordingly.
+                        backend_session_id = if cross_engine {
+                            None
+                        } else {
+                            backend_session_id
+                        };
+                        // Refresh active_seg + conv_meta after render mutations.
+                        if let Some(s) = cfg
+                            .store
+                            .active_segment(conv_meta.id.as_deref().expect("id"))
+                            .await?
+                        {
+                            active_seg = s;
+                        }
+                        if let Ok(Some(m)) =
+                            cfg.store.get_conversation_metadata(&conv.name).await
+                        {
+                            conv_meta = m;
+                        }
                         continue;
                     }
                     Err(e) => break Err(e),
@@ -198,19 +319,55 @@ async fn run_chat(
                     break Err(e);
                 }
                 // For claude, first turn produced the session UUID;
-                // persist if we didn't have one yet.
+                // persist on the active segment if we didn't have one yet.
                 if backend_session_id.is_none() {
                     if let Some(id) = session.thread_id() {
-                        cfg.store.set_backend_session_id(&conv.name, id).await?;
+                        orch::set_active_segment_engine_id_if_needed(
+                            cfg, &conv.name, &active_seg, id,
+                        )
+                        .await
+                        .map_err(|e| ChatError::Io(std::io::Error::other(e.to_string())))?;
                         backend_session_id = Some(id.to_owned());
+                        // Refresh metadata + segment now that ids are populated.
+                        if let Some(s) = cfg
+                            .store
+                            .active_segment(conv_meta.id.as_deref().expect("id"))
+                            .await?
+                        {
+                            active_seg = s;
+                        }
+                        if let Ok(Some(m)) =
+                            cfg.store.get_conversation_metadata(&conv.name).await
+                        {
+                            conv_meta = m;
+                        }
                     }
                 }
                 cfg.store.touch_conversation(&conv.name).await?;
+                // tier 1: absorb new bytes after each turn into central
+                if let Err(e) =
+                    orch::absorb_after_turn_for_session(cfg, &conv_meta, &profile, &active_seg)
+                        .await
+                {
+                    eprintln!("✗ post-turn absorb failed: {e}");
+                }
+                // Refresh active_seg so its last_absorbed_bytes is current.
+                if let Some(s) = cfg
+                    .store
+                    .active_segment(conv_meta.id.as_deref().expect("id"))
+                    .await?
+                {
+                    active_seg = s;
+                }
             }
         }
     };
 
     let _ = session.close().await;
+    // tier 1: final absorb + cleanup at session end
+    if let Err(e) = orch::finalize_session(cfg, &conv_meta, &profile, &active_seg).await {
+        eprintln!("✗ session finalize failed: {e}");
+    }
     result
 }
 

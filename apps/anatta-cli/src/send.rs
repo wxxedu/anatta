@@ -12,6 +12,7 @@ use anatta_runtime::{LockError, SessionLock};
 use clap::Args;
 
 use crate::config::Config;
+use crate::conversation as orch;
 use crate::launch::{self, LaunchError};
 
 #[derive(Args, Debug)]
@@ -77,12 +78,64 @@ pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
     };
 
     let _lock = maybe_acquire_chat_lock(args.resume.as_deref(), cfg).await?;
-    let launch = launch::build_launch(&record, cwd, args.resume, cfg)?;
+    // Tier 1: if --resume points to a known conversation, bootstrap segments
+    // and render the working file under the (matching profile's) projects/.
+    let segment_ctx = if let Some((conv_name, _)) = &_lock {
+        match orch::ensure_active_segment(cfg, conv_name, &record).await {
+            Ok(seg) => {
+                let meta = cfg
+                    .store
+                    .get_conversation_metadata(conv_name)
+                    .await?
+                    .map(|m| (conv_name.clone(), seg, m));
+                if let Some((_n, seg, meta)) = &meta {
+                    if let Err(e) =
+                        orch::render_for_session(cfg, meta, &record, &seg.id).await
+                    {
+                        eprintln!("[anatta] warn: render failed before send: {e}");
+                    }
+                }
+                meta
+            }
+            Err(e) => {
+                eprintln!("[anatta] warn: segment bootstrap failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
+    // Refresh segment after render adjusted offsets.
+    let segment_ctx = if let Some((n, _, meta)) = segment_ctx {
+        if let Ok(Some(seg)) = cfg
+            .store
+            .active_segment(meta.id.as_deref().unwrap_or(""))
+            .await
+        {
+            Some((n, seg, meta))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let launch = launch::build_launch(&record, cwd, args.resume, cfg)?;
     let mut session = Session::open(launch).await?;
     let kind = session.kind();
     if let Some(id) = session.thread_id() {
         eprintln!("[anatta] session: {id}");
+    }
+    // First-turn case for send: if the active segment's engine_session_id
+    // is NULL and we just learned it from the spawned CLI, persist on the
+    // segment (with back-compat dual-write to conversations.session_uuid).
+    if let Some((conv_name, seg, _)) = &segment_ctx {
+        if let Some(id) = session.thread_id() {
+            orch::set_active_segment_engine_id_if_needed(cfg, conv_name, seg, id)
+                .await
+                .map_err(|e| SendError::Io(std::io::Error::other(e.to_string())))?;
+        }
     }
 
     let mut turn = session.send_turn(&args.prompt).await?;
@@ -97,6 +150,21 @@ pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
     // (its session-level exit comes from Session::close below).
     let per_turn_exit = turn.finalize().await?;
     let session_exit = session.close().await?;
+
+    // Tier 1: absorb new bytes into central + finalize (deletes working).
+    if let Some((conv_name, seg, _)) = &segment_ctx {
+        if let Ok(Some(meta)) = cfg.store.get_conversation_metadata(conv_name).await {
+            if let Err(e) =
+                orch::absorb_after_turn_for_session(cfg, &meta, &record, seg).await
+            {
+                eprintln!("[anatta] warn: absorb after send failed: {e}");
+            }
+            // finalize: send is one-shot, so this is the end of the session.
+            if let Err(e) = orch::finalize_session(cfg, &meta, &record, seg).await {
+                eprintln!("[anatta] warn: finalize after send failed: {e}");
+            }
+        }
+    }
 
     cfg.store.touch_profile(&record.id).await?;
     if let Some((name, _lock)) = &_lock {
