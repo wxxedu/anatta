@@ -234,26 +234,46 @@ async fn run_chat(
                         };
                         // Render under new profile. For cross-engine the foreign
                         // prior segments are routed through the transcoder cache.
-                        // engine_session_id on the new segment is NULL at this point,
-                        // so render returns SkippedFirstTurn — the new engine will
-                        // mint its own id on the first turn.
-                        if let Err(e) =
-                            orch::render_for_session(cfg, &conv_meta, &new_profile, &new_active.id).await
+                        // The new segment carries a pre-minted engine_session_id
+                        // (set in open_segment_for_swap) so render can write the
+                        // working file under a stable resume coordinate.
+                        let render_outcome = match orch::render_for_session(
+                            cfg, &conv_meta, &new_profile, &new_active.id,
+                        )
+                        .await
                         {
-                            eprintln!("✗ render under new profile failed: {e}");
-                            let _ = cfg.store.close_segment(&new_active.id, false).await;
-                            continue;
-                        }
-                        // Re-fetch the just-opened new segment to pick up its
-                        // minted engine_session_id; render_for_session above
-                        // already wrote the working file at that id's path
-                        // with transcoded prior history. Resume against it.
+                            Ok(o) => o,
+                            Err(e) => {
+                                eprintln!("✗ render under new profile failed: {e}");
+                                let _ = cfg.store.close_segment(&new_active.id, false).await;
+                                continue;
+                            }
+                        };
+                        // If render produced no working content (all prior
+                        // segments empty — e.g., user `/profile`d before
+                        // any turn happened on the previous segment), don't
+                        // resume against the empty file: claude / codex will
+                        // bail. Start fresh and let the engine mint its own
+                        // session id; we'll persist it post-turn,
+                        // overwriting the placeholder.
+                        let render_was_empty = matches!(
+                            render_outcome,
+                            anatta_runtime::conversation::RenderOutcome::SkippedFirstTurn
+                        ) || matches!(
+                            render_outcome,
+                            anatta_runtime::conversation::RenderOutcome::Rendered { working_bytes: 0 }
+                        );
+                        // Re-fetch to pick up the minted engine_session_id.
                         let new_active_after_render = cfg
                             .store
                             .get_segment(&new_active.id)
                             .await?
                             .expect("just opened");
-                        let resume_id = new_active_after_render.engine_session_id.clone();
+                        let resume_id = if render_was_empty {
+                            None
+                        } else {
+                            new_active_after_render.engine_session_id.clone()
+                        };
                         let new_launch = match launch::build_launch(
                             &new_profile,
                             cwd.clone(),
