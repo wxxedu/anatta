@@ -151,26 +151,24 @@ fn transcode_one<W: Write>(
     let payload = v.get("payload").unwrap_or(&Value::Null);
 
     match event_type {
-        "session_meta" => {
-            if !state.seen_first_session_meta {
-                state.seen_first_session_meta = true;
-                // Defer system/init emission until we also have a turn_context
-                // (so we can include model). If turn_context never arrives,
-                // emit system/init on first response_item.
-            }
-            // Subsequent session_metas (shouldn't happen) dropped.
+        // First session_meta: defer system/init emission until we also
+        // have a turn_context (so we can include model). If turn_context
+        // never arrives, emit system/init on first response_item.
+        // Subsequent session_metas (shouldn't happen) are dropped.
+        "session_meta" if !state.seen_first_session_meta => {
+            state.seen_first_session_meta = true;
         }
-        "turn_context" => {
-            if !state.seen_first_turn_context {
-                state.seen_first_turn_context = true;
-                state.model = payload
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-            }
-            // Mid-session turn_contexts dropped.
+        "session_meta" => {}
+        // First turn_context: capture model. Mid-session turn_contexts dropped.
+        "turn_context" if !state.seen_first_turn_context => {
+            state.seen_first_turn_context = true;
+            state.model = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
         }
+        "turn_context" => {}
         "response_item" => {
             ensure_session_init(state, out)?;
             transcode_response_item(payload, state, out)?;
