@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE conversation_segments\n               SET engine_session_id = ?\n             WHERE id = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "86abe9c76f798ad8fbd6d9ebb8e2200487990a29beb9f4e4d093cdea6d85539a"
+}

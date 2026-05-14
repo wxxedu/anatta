@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                c.id,\n                c.created_at,\n                c.last_used_at AS \"last_used_at!\"\n            FROM conversations c\n            WHERE c.name = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_used_at!",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "0299bd2f4dbfb12ef4e9cc809fd1383a686260a2fa2292ca3e69c789857ece17"
+}

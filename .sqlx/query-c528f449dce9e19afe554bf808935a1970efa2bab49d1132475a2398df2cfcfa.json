@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                name               AS \"name!\",\n                profile_id         AS \"profile_id!\",\n                backend_session_id,\n                cwd                AS \"cwd!\",\n                last_used_at       AS \"last_used_at!\"\n            FROM conversations\n            ORDER BY last_used_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "profile_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "backend_session_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "cwd!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_used_at!",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "c528f449dce9e19afe554bf808935a1970efa2bab49d1132475a2398df2cfcfa"
+}
