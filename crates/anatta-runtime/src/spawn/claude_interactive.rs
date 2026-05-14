@@ -21,11 +21,12 @@ use crate::claude::HistoryProjector;
 use crate::conversation::paths::{wait_for_jsonl, working_jsonl_path};
 use crate::profile::ClaudeProfile;
 use crate::spawn::stderr_buf;
-use crate::spawn::{ClaudeSessionId, SpawnError};
+use crate::spawn::{ClaudeSessionId, ExitInfo, SpawnError};
 
 const PTY_ROWS: u16 = 50;
 const PTY_COLS: u16 = 200;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
 // ──────────────────────────────────────────────────────────────────────
 // Prompt encoding
@@ -176,16 +177,13 @@ pub(crate) struct ActiveTurn {
 
 /// Long-lived interactive `claude` connection.
 pub struct ClaudeInteractiveSession {
-    #[allow(dead_code)] // used in Task 8 (close/wait)
     child: Box<dyn portable_pty::Child + Send + Sync>,
     #[allow(dead_code)] // held so resize(...) can be added later
     master: Box<dyn MasterPty + Send>,
     session_id: ClaudeSessionId,
     pty_tx: mpsc::Sender<PtyCommand>,
     active_turn: Arc<Mutex<Option<ActiveTurn>>>,
-    #[allow(dead_code)] // kept for ExitInfo shape (Task 8)
     stderr: stderr_buf::Handle,
-    #[allow(dead_code)] // kept for ExitInfo shape (Task 8)
     started_at: Instant,
     events_emitted: Arc<AtomicU64>,
 }
@@ -515,6 +513,42 @@ pub struct InteractiveTurnHandle {
 impl InteractiveTurnHandle {
     pub fn events(&mut self) -> &mut mpsc::Receiver<AgentEvent> {
         &mut self.events_rx
+    }
+}
+
+impl ClaudeInteractiveSession {
+    /// Shut the session down: tell the writer thread to drop the master
+    /// (which sends SIGHUP to the child), wait up to `CLOSE_GRACE` for
+    /// natural exit, otherwise surface a timeout error. portable-pty's
+    /// `Child::wait` is sync, so we drive it on a blocking task.
+    pub async fn close(self) -> Result<ExitInfo, SpawnError> {
+        let _ = self.pty_tx.send(PtyCommand::Shutdown).await;
+        let started_at = self.started_at;
+        let stderr = self.stderr;
+        let events_emitted = self.events_emitted;
+        let mut child = self.child;
+
+        let wait_handle = tokio::task::spawn_blocking(move || child.wait());
+
+        match tokio::time::timeout(CLOSE_GRACE, wait_handle).await {
+            Ok(joined) => {
+                let status = joined
+                    .map_err(|e| SpawnError::Io(std::io::Error::other(e)))?
+                    .map_err(|e| SpawnError::Io(std::io::Error::other(format!(
+                        "child.wait: {e}"
+                    ))))?;
+                Ok(ExitInfo {
+                    exit_code: Some(status.exit_code() as i32),
+                    signal: None,
+                    duration: started_at.elapsed(),
+                    stderr_tail: stderr.snapshot(),
+                    events_emitted: events_emitted.load(Ordering::Relaxed),
+                })
+            }
+            Err(_) => Err(SpawnError::Io(std::io::Error::other(
+                "interactive claude did not exit within close grace",
+            ))),
+        }
     }
 }
 
