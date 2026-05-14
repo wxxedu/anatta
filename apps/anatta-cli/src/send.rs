@@ -54,9 +54,7 @@ pub enum SendError {
         signal: Option<i32>,
         stderr_tail: String,
     },
-    #[error(
-        "session id matches conversation '{0}' which is in use by another anatta process"
-    )]
+    #[error("session id matches conversation '{0}' which is in use by another anatta process")]
     ConversationLocked(String),
 
     #[error("launch: {0}")]
@@ -95,9 +93,7 @@ pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
                     .await?
                     .map(|m| (conv_name.clone(), seg, m));
                 if let Some((_n, seg, meta)) = &meta {
-                    if let Err(e) =
-                        orch::render_for_session(cfg, meta, &record, &seg.id).await
-                    {
+                    if let Err(e) = orch::render_for_session(cfg, meta, &record, &seg.id).await {
                         eprintln!("[anatta] warn: render failed before send: {e}");
                     }
                 }
@@ -160,9 +156,7 @@ pub async fn run(args: SendArgs, cfg: &Config) -> Result<(), SendError> {
     // Tier 1: absorb new bytes into central + finalize (deletes working).
     if let Some((conv_name, seg, _)) = &segment_ctx {
         if let Ok(Some(meta)) = cfg.store.get_conversation_metadata(conv_name).await {
-            if let Err(e) =
-                orch::absorb_after_turn_for_session(cfg, &meta, &record, seg).await
-            {
+            if let Err(e) = orch::absorb_after_turn_for_session(cfg, &meta, &record, seg).await {
                 eprintln!("[anatta] warn: absorb after send failed: {e}");
             }
             // finalize: send is one-shot, so this is the end of the session.
@@ -269,7 +263,10 @@ fn render_pretty(ev: &AgentEvent) {
             let pct = used_percent
                 .map(|p| format!(" {p:.0}%"))
                 .unwrap_or_default();
-            let st = status.as_deref().map(|s| format!(" [{s}]")).unwrap_or_default();
+            let st = status
+                .as_deref()
+                .map(|s| format!(" [{s}]"))
+                .unwrap_or_default();
             eprintln!("[rate-limit] {limit_kind}{pct}{st}");
         }
         Error { message, fatal } => {

@@ -99,7 +99,11 @@ async fn launch_extracts_session_id_from_first_init_event() {
 
     let exit = session.wait().await.expect("wait");
     assert_eq!(exit.exit_code, Some(0));
-    assert!(exit.events_emitted >= 3, "events_emitted={}", exit.events_emitted);
+    assert!(
+        exit.events_emitted >= 3,
+        "events_emitted={}",
+        exit.events_emitted
+    );
 }
 
 #[tokio::test]
@@ -140,7 +144,10 @@ async fn launch_fails_when_child_exits_without_emitting() {
         provider: None,
     };
 
-    let err = launch.launch().await.expect_err("should fail with no events");
+    let err = launch
+        .launch()
+        .await
+        .expect_err("should fail with no events");
     assert!(matches!(
         err,
         anatta_runtime::spawn::SpawnError::ChildExitedEarly { .. }
@@ -210,7 +217,10 @@ printf '%s\n' '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"sess
 
     let provider = ProviderEnv {
         vars: vec![
-            ("ANTHROPIC_BASE_URL".into(), "https://api.test.example/anthropic".into()),
+            (
+                "ANTHROPIC_BASE_URL".into(),
+                "https://api.test.example/anthropic".into(),
+            ),
             ("ANTHROPIC_AUTH_TOKEN".into(), "sk-test-abc".into()),
             ("ANTHROPIC_MODEL".into(), "test-model-7b".into()),
             ("CLAUDE_CODE_EFFORT_LEVEL".into(), "max".into()),
@@ -232,10 +242,12 @@ printf '%s\n' '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"sess
     // Wait for child to exit so env.dump is fully flushed.
     let _ = session.wait().await.unwrap();
 
-    let dumped = std::fs::read_to_string(profile.path.join("env.dump"))
-        .expect("env dump should exist");
-    assert!(dumped.contains("ANTHROPIC_BASE_URL=https://api.test.example/anthropic"),
-        "missing ANTHROPIC_BASE_URL in dump:\n{dumped}");
+    let dumped =
+        std::fs::read_to_string(profile.path.join("env.dump")).expect("env dump should exist");
+    assert!(
+        dumped.contains("ANTHROPIC_BASE_URL=https://api.test.example/anthropic"),
+        "missing ANTHROPIC_BASE_URL in dump:\n{dumped}"
+    );
     assert!(dumped.contains("ANTHROPIC_AUTH_TOKEN=sk-test-abc"));
     assert!(dumped.contains("ANTHROPIC_MODEL=test-model-7b"));
     assert!(dumped.contains("CLAUDE_CODE_EFFORT_LEVEL=max"));
@@ -275,9 +287,16 @@ printf '%s\n' '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"sess
     let dumped = std::fs::read_to_string(profile.path.join("env.dump")).unwrap();
     // CLAUDE_CONFIG_DIR is always set by the spawn code; we assert that
     // ANTHROPIC_AUTH_TOKEN is NOT — that's the OAuth path.
-    assert!(dumped.contains("CLAUDE_CONFIG_DIR="), "CLAUDE_CONFIG_DIR should always be set");
-    assert!(!dumped.contains("ANTHROPIC_AUTH_TOKEN="),
-        "ANTHROPIC_AUTH_TOKEN must NOT be set in OAuth path:\n{dumped}");
-    assert!(!dumped.contains("ANTHROPIC_BASE_URL="),
-        "ANTHROPIC_BASE_URL must NOT be set in OAuth path");
+    assert!(
+        dumped.contains("CLAUDE_CONFIG_DIR="),
+        "CLAUDE_CONFIG_DIR should always be set"
+    );
+    assert!(
+        !dumped.contains("ANTHROPIC_AUTH_TOKEN="),
+        "ANTHROPIC_AUTH_TOKEN must NOT be set in OAuth path:\n{dumped}"
+    );
+    assert!(
+        !dumped.contains("ANTHROPIC_BASE_URL="),
+        "ANTHROPIC_BASE_URL must NOT be set in OAuth path"
+    );
 }

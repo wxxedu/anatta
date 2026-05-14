@@ -167,9 +167,7 @@ mod tests {
         let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
         pool.close().await;
 
-        let r = list_sub_agent_rollouts(&db_path, "anything")
-            .await
-            .unwrap();
+        let r = list_sub_agent_rollouts(&db_path, "anything").await.unwrap();
         assert!(r.is_empty());
     }
 
@@ -179,10 +177,12 @@ mod tests {
         let db_path = tmp.path().join("state.db");
         let pool = create_state_db(&db_path).await;
 
-        sqlx::query("INSERT INTO threads (id, rollout_path) VALUES ('parent', '/path/parent.jsonl')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO threads (id, rollout_path) VALUES ('parent', '/path/parent.jsonl')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO threads (id, rollout_path) VALUES ('child1', '/path/child1.jsonl')",
         )

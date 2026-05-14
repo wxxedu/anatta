@@ -84,17 +84,17 @@ impl BackendDistribution for ClaudeDistribution {
             return Err(DistError::Parse {
                 url: manifest_url.clone(),
                 what: "manifest.version",
-                detail: format!(
-                    "expected {version}, got {}",
-                    manifest.version
-                ),
+                detail: format!("expected {version}, got {}", manifest.version),
             });
         }
 
-        let entry = manifest.platforms.get(platform_str).ok_or(DistError::NoPlatformBuild {
-            backend: "claude",
-            platform,
-        })?;
+        let entry = manifest
+            .platforms
+            .get(platform_str)
+            .ok_or(DistError::NoPlatformBuild {
+                backend: "claude",
+                platform,
+            })?;
 
         let url = format!(
             "{}/{}/{}/{}",
@@ -204,16 +204,32 @@ mod tests {
 
     #[test]
     fn platform_string_mapping() {
-        let p = Platform { os: Os::Macos, arch: Arch::Aarch64, libc: Libc::None };
+        let p = Platform {
+            os: Os::Macos,
+            arch: Arch::Aarch64,
+            libc: Libc::None,
+        };
         assert_eq!(claude_platform_string(p), Some("darwin-arm64"));
 
-        let p = Platform { os: Os::Linux, arch: Arch::X86_64, libc: Libc::Musl };
+        let p = Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+            libc: Libc::Musl,
+        };
         assert_eq!(claude_platform_string(p), Some("linux-x64-musl"));
 
-        let p = Platform { os: Os::Linux, arch: Arch::X86_64, libc: Libc::Glibc };
+        let p = Platform {
+            os: Os::Linux,
+            arch: Arch::X86_64,
+            libc: Libc::Glibc,
+        };
         assert_eq!(claude_platform_string(p), Some("linux-x64"));
 
-        let p = Platform { os: Os::Windows, arch: Arch::X86_64, libc: Libc::None };
+        let p = Platform {
+            os: Os::Windows,
+            arch: Arch::X86_64,
+            libc: Libc::None,
+        };
         assert_eq!(claude_platform_string(p), Some("win32-x64"));
     }
 

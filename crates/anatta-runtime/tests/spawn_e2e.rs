@@ -29,7 +29,9 @@ use std::time::Duration;
 
 use anatta_core::AgentEventPayload;
 use anatta_runtime::profile::{ClaudeProfile, ClaudeProfileId, CodexProfile, CodexProfileId};
-use anatta_runtime::spawn::{ClaudeLaunch, ClaudeInteractiveLaunch, ClaudeInteractiveSession, CodexLaunch, Launchable};
+use anatta_runtime::spawn::{
+    ClaudeInteractiveLaunch, ClaudeInteractiveSession, ClaudeLaunch, CodexLaunch, Launchable,
+};
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME"))
@@ -103,9 +105,7 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
                 is_error,
             } => {
                 saw_turn_completed = true;
-                eprintln!(
-                    "TurnCompleted stop_reason={stop_reason:?} is_error={is_error}"
-                );
+                eprintln!("TurnCompleted stop_reason={stop_reason:?} is_error={is_error}");
             }
             other => eprintln!("(other) {other:?}"),
         }
@@ -117,7 +117,10 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
         exit.exit_code, exit.duration, exit.events_emitted
     );
     if !exit.stderr_tail.is_empty() {
-        eprintln!("--- stderr tail ---\n{}\n--- end stderr ---", exit.stderr_tail);
+        eprintln!(
+            "--- stderr tail ---\n{}\n--- end stderr ---",
+            exit.stderr_tail
+        );
     }
 
     assert!(saw_session_started, "no SessionStarted event");
@@ -154,7 +157,10 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
 async fn launch_real_claude_interactive_emits_session_started_assistant_completion() {
     let bin = locate_binary("claude").expect("claude binary not on PATH");
     let claude_dir = home().join(".claude");
-    assert!(claude_dir.is_dir(), "no ~/.claude found; log in via `claude /login` first");
+    assert!(
+        claude_dir.is_dir(),
+        "no ~/.claude found; log in via `claude /login` first"
+    );
 
     let profile = ClaudeProfile {
         id: ClaudeProfileId::new(),
@@ -227,7 +233,10 @@ async fn interactive_cancel_closes_turn_channel() {
 
     let bin = locate_binary("claude").expect("claude binary not on PATH");
     let claude_dir = home().join(".claude");
-    let profile = ClaudeProfile { id: ClaudeProfileId::new(), path: claude_dir };
+    let profile = ClaudeProfile {
+        id: ClaudeProfileId::new(),
+        path: claude_dir,
+    };
     let cwd = std::fs::canonicalize(tempfile::tempdir().unwrap().path()).unwrap();
 
     let session = ClaudeInteractiveSession::open(ClaudeInteractiveLaunch {
@@ -253,12 +262,14 @@ async fn interactive_cancel_closes_turn_channel() {
 
     // Let some assistant output start, then cancel.
     let _ = tokio::time::timeout(Duration::from_secs(3), turn.events().recv()).await;
-    session.interrupt_handle().interrupt().await.expect("interrupt");
+    session
+        .interrupt_handle()
+        .interrupt()
+        .await
+        .expect("interrupt");
 
     // Channel must close within a reasonable grace.
-    let drain = async {
-        while turn.events().recv().await.is_some() {}
-    };
+    let drain = async { while turn.events().recv().await.is_some() {} };
     tokio::time::timeout(Duration::from_secs(10), drain)
         .await
         .expect("turn channel did not close within 10s after interrupt");
@@ -316,7 +327,10 @@ async fn launch_real_codex_emits_session_started_assistant_completion() {
     }
 
     let exit = session.wait().await.expect("wait");
-    eprintln!("exit code={:?} duration={:?}", exit.exit_code, exit.duration);
+    eprintln!(
+        "exit code={:?} duration={:?}",
+        exit.exit_code, exit.duration
+    );
 
     assert!(saw_session_started, "no SessionStarted");
     assert!(saw_assistant_text, "no AssistantText");

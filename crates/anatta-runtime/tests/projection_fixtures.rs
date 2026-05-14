@@ -66,11 +66,11 @@ where
     let mut total_projected = 0_usize;
     let mut empty_projection = 0_usize;
     for file in &files {
-        let Ok(content) = fs::read_to_string(file) else { continue };
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
+        };
         for line in content.lines() {
-            if line.trim().is_empty()
-                || line.starts_with("Error:")
-                || line.starts_with("WARNING:")
+            if line.trim().is_empty() || line.starts_with("Error:") || line.starts_with("WARNING:")
             {
                 continue;
             }
@@ -103,7 +103,10 @@ fn projects_claude_history_without_panic() {
 
 #[test]
 fn projects_claude_stream_without_panic() {
-    stress("ANATTA_CLAUDE_STREAM_FIXTURE", claude::StreamProjector::new());
+    stress(
+        "ANATTA_CLAUDE_STREAM_FIXTURE",
+        claude::StreamProjector::new(),
+    );
 }
 
 #[test]

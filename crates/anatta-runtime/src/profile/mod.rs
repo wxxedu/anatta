@@ -19,8 +19,8 @@ pub mod providers;
 
 pub use claude::ClaudeProfile;
 pub use codex::CodexProfile;
-pub use family::{default_family, family_of, BackendKind, Family};
-pub use policy::{min_policy_for, CompactSummary, SegmentRenderPolicy};
+pub use family::{BackendKind, Family, default_family, family_of};
+pub use policy::{CompactSummary, SegmentRenderPolicy, min_policy_for};
 pub use providers::{Overrides, ProviderEnv, ProviderSpec, Tier};
 
 use std::fmt;
@@ -167,7 +167,10 @@ pub(super) fn profile_dir(anatta_root: &std::path::Path, id: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
-pub(super) fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> Result<(), ProfileError> {
+pub(super) fn symlink_dir(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> Result<(), ProfileError> {
     std::os::unix::fs::symlink(target, link).map_err(|e| ProfileError::Io {
         path: link.to_owned(),
         source: e,
@@ -175,7 +178,10 @@ pub(super) fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> R
 }
 
 #[cfg(windows)]
-pub(super) fn symlink_dir(target: &std::path::Path, link: &std::path::Path) -> Result<(), ProfileError> {
+pub(super) fn symlink_dir(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> Result<(), ProfileError> {
     std::os::windows::fs::symlink_dir(target, link).map_err(|e| ProfileError::Io {
         path: link.to_owned(),
         source: e,

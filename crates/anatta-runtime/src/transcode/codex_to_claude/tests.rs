@@ -4,7 +4,7 @@ use std::fs;
 
 use serde_json::Value;
 
-use crate::transcode::{transcode_to, Engine, TranscodeInput};
+use crate::transcode::{Engine, TranscodeInput, transcode_to};
 
 fn write_src(tmp: &std::path::Path, lines: &[&str]) -> std::path::PathBuf {
     let p = tmp.join("source.jsonl");
@@ -104,10 +104,7 @@ fn codex_user_message_becomes_claude_user_text() {
     // [0] system/init, [1] user
     let u = &emitted[1];
     assert_eq!(etype(u), "user");
-    assert_eq!(
-        u["message"]["content"][0]["type"].as_str(),
-        Some("text")
-    );
+    assert_eq!(u["message"]["content"][0]["type"].as_str(), Some("text"));
     assert_eq!(
         u["message"]["content"][0]["text"].as_str(),
         Some("what color")
@@ -138,10 +135,7 @@ fn codex_assistant_message_becomes_claude_assistant_text() {
     let emitted = read_view(&view);
     let a = &emitted[1];
     assert_eq!(etype(a), "assistant");
-    assert_eq!(
-        a["message"]["content"][0]["text"].as_str(),
-        Some("answer")
-    );
+    assert_eq!(a["message"]["content"][0]["text"].as_str(), Some("answer"));
 }
 
 #[test]
@@ -170,7 +164,11 @@ fn codex_reasoning_is_dropped() {
     assert!(!raw.contains("ENC_X"), "encrypted_content must not leak");
     assert!(!raw.contains("\"thought\""), "reasoning text must not leak");
     let emitted = read_view(&view);
-    assert_eq!(emitted.len(), 2, "system/init + assistant; reasoning dropped");
+    assert_eq!(
+        emitted.len(),
+        2,
+        "system/init + assistant; reasoning dropped"
+    );
 }
 
 #[test]
@@ -288,7 +286,10 @@ fn developer_role_messages_are_dropped() {
     )
     .unwrap();
     let raw = fs::read_to_string(view.join("events.jsonl")).unwrap();
-    assert!(!raw.contains("permissions"), "developer message must be dropped");
+    assert!(
+        !raw.contains("permissions"),
+        "developer message must be dropped"
+    );
     let emitted = read_view(&view);
     // [0] system/init, [1] user (developer dropped)
     assert_eq!(emitted.len(), 2);
@@ -319,6 +320,9 @@ fn malformed_source_returns_parse_error_and_leaves_no_view() {
         &view,
     )
     .unwrap_err();
-    assert!(matches!(err, crate::transcode::TranscodeError::Parse { line: 2, .. }));
+    assert!(matches!(
+        err,
+        crate::transcode::TranscodeError::Parse { line: 2, .. }
+    ));
     assert!(!view.exists());
 }

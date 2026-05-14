@@ -42,7 +42,6 @@ pub fn working_sidecar_dir(profile_dir: &Path, canonical_cwd: &str, session_uuid
         .join(session_uuid)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,7 +106,4 @@ mod tests {
             PathBuf::from("/profile/dir/projects/-Users-wxx-code/abcd-1234"),
         );
     }
-
-
-
 }

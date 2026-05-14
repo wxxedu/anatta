@@ -29,10 +29,14 @@ pub(super) async fn download_with_verify(
             source: e,
         })?;
 
-    let resp = client.get(&info.url).send().await.map_err(|e| DistError::Network {
-        url: info.url.clone(),
-        source: e,
-    })?;
+    let resp = client
+        .get(&info.url)
+        .send()
+        .await
+        .map_err(|e| DistError::Network {
+            url: info.url.clone(),
+            source: e,
+        })?;
 
     if !resp.status().is_success() {
         return Err(DistError::HttpStatus {
@@ -90,10 +94,12 @@ pub(super) async fn install_payload(
     binary_path: &Path,
 ) -> Result<(), DistError> {
     if let Some(parent) = binary_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| DistError::Io {
-            path: parent.to_owned(),
-            source: e,
-        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| DistError::Io {
+                path: parent.to_owned(),
+                source: e,
+            })?;
     }
 
     match info.format {
@@ -109,10 +115,12 @@ pub(super) async fn install_payload(
 }
 
 async fn write_executable(path: &Path, bytes: &[u8]) -> Result<(), DistError> {
-    let mut f = tokio::fs::File::create(path).await.map_err(|e| DistError::Io {
-        path: path.to_owned(),
-        source: e,
-    })?;
+    let mut f = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| DistError::Io {
+            path: path.to_owned(),
+            source: e,
+        })?;
     f.write_all(bytes).await.map_err(|e| DistError::Io {
         path: path.to_owned(),
         source: e,
@@ -172,13 +180,14 @@ fn extract_tar_gz_blocking(
     _install_dir: &Path,
     binary_path: &Path,
 ) -> Result<(), DistError> {
-    let want_inner = info.binary_in_archive.as_deref().ok_or_else(|| {
-        DistError::Parse {
+    let want_inner = info
+        .binary_in_archive
+        .as_deref()
+        .ok_or_else(|| DistError::Parse {
             url: info.url.clone(),
             what: "binary_in_archive",
             detail: "TarGz format requires binary_in_archive to be set".into(),
-        }
-    })?;
+        })?;
 
     let tar = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(tar);
@@ -198,10 +207,12 @@ fn extract_tar_gz_blocking(
         if path_in_tar.to_string_lossy() == want_inner {
             // Read and write out as the binary.
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).map_err(|e| DistError::Archive {
-                path: binary_path.to_owned(),
-                source: e,
-            })?;
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|e| DistError::Archive {
+                    path: binary_path.to_owned(),
+                    source: e,
+                })?;
             std::fs::write(binary_path, &buf).map_err(|e| DistError::Io {
                 path: binary_path.to_owned(),
                 source: e,

@@ -29,8 +29,8 @@ use anatta_core::AgentEvent;
 use super::{
     AgentSession, ClaudeInteractiveInterruptHandle, ClaudeInteractiveLaunch,
     ClaudeInteractiveSession, ClaudeLaunch, ClaudeSessionId, CodexInterruptHandle, CodexLaunch,
-    CodexThreadId, ExitInfo, InteractiveTurnHandle, Launchable, PersistentCodexSession,
-    SpawnError, TurnHandle,
+    CodexThreadId, ExitInfo, InteractiveTurnHandle, Launchable, PersistentCodexSession, SpawnError,
+    TurnHandle,
 };
 
 /// Which backend is on the other end. Mirrors the store's `BackendKind`
@@ -99,9 +99,9 @@ impl Session {
     pub async fn open(launch: BackendLaunch) -> Result<Self, SpawnError> {
         match launch {
             BackendLaunch::Claude(l) => Ok(Session::Claude(ClaudeSession::open(l))),
-            BackendLaunch::ClaudeInteractive(l) => {
-                Ok(Session::ClaudeInteractive(ClaudeInteractiveSession::open(l).await?))
-            }
+            BackendLaunch::ClaudeInteractive(l) => Ok(Session::ClaudeInteractive(
+                ClaudeInteractiveSession::open(l).await?,
+            )),
             BackendLaunch::Codex(l) => Ok(Session::Codex(CodexSession::open(l).await?)),
         }
     }
@@ -180,8 +180,11 @@ impl Session {
         let same_shape = matches!(
             (&*self, &new_launch),
             (Session::Claude(_), BackendLaunch::Claude(_))
-            | (Session::ClaudeInteractive(_), BackendLaunch::ClaudeInteractive(_))
-            | (Session::Codex(_), BackendLaunch::Codex(_))
+                | (
+                    Session::ClaudeInteractive(_),
+                    BackendLaunch::ClaudeInteractive(_)
+                )
+                | (Session::Codex(_), BackendLaunch::Codex(_))
         );
 
         if cur_kind == new_kind && same_shape {
@@ -240,9 +243,7 @@ pub enum SwapError {
     /// Tier 1/2 historical variant kept for callers that need to
     /// distinguish "would have been rejected pre-tier-3" — tier 3
     /// no longer raises this; cross-backend swap proceeds.
-    #[error(
-        "cross-backend swap not supported (current: {current:?}, target: {target:?})"
-    )]
+    #[error("cross-backend swap not supported (current: {current:?}, target: {target:?})")]
     BackendMismatch {
         current: BackendKind,
         target: BackendKind,
@@ -418,4 +419,3 @@ impl TurnEvents {
         }
     }
 }
-

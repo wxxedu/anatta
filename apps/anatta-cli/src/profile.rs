@@ -166,9 +166,20 @@ pub async fn run(cmd: ProfileCommand, cfg: &Config) -> Result<(), ProfileCmdErro
             family,
         } => {
             create(
-                cfg, backend, name, auth, api_key, non_interactive,
-                provider, base_url, model, small_fast_model,
-                opus_model, sonnet_model, haiku_model, subagent_model,
+                cfg,
+                backend,
+                name,
+                auth,
+                api_key,
+                non_interactive,
+                provider,
+                base_url,
+                model,
+                small_fast_model,
+                opus_model,
+                sonnet_model,
+                haiku_model,
+                subagent_model,
                 family,
             )
             .await
@@ -216,7 +227,11 @@ async fn create(
                 .default(0)
                 .items(&items)
                 .interact()?;
-            if pick == 0 { BackendKind::Claude } else { BackendKind::Codex }
+            if pick == 0 {
+                BackendKind::Claude
+            } else {
+                BackendKind::Codex
+            }
         }
     };
     let backend_str = backend.as_str();
@@ -236,8 +251,14 @@ async fn create(
                     anatta_runtime::profile::providers::iter_for_backend(backend_str).collect();
                 let labels: Vec<String> = candidates
                     .iter()
-                    .map(|s| format!("{}  ({:?}, {})", s.display_name, s.tier,
-                                     s.supported_auth.join("+")))
+                    .map(|s| {
+                        format!(
+                            "{}  ({:?}, {})",
+                            s.display_name,
+                            s.tier,
+                            s.supported_auth.join("+")
+                        )
+                    })
                     .collect();
                 let pick = dialoguer::Select::with_theme(&theme)
                     .with_prompt("Provider")
@@ -328,7 +349,10 @@ async fn create(
 
     // 6b. Validate `--family` if supplied; warn on footgun combinations.
     if let Some(ref fam) = family_flag {
-        if !matches!(fam.as_str(), "a-native" | "a-compat" | "o-native" | "o-compat") {
+        if !matches!(
+            fam.as_str(),
+            "a-native" | "a-compat" | "o-native" | "o-compat"
+        ) {
             return Err(ProfileCmdError::BadFamily(fam.clone()));
         }
     }
@@ -430,8 +454,8 @@ async fn run_auth(
                 BackendKind::Claude => "claude",
                 BackendKind::Codex => "codex",
             };
-            let binary = auth::locate_binary(bin_name)
-                .ok_or(ProfileCmdError::BinaryNotFound(bin_name))?;
+            let binary =
+                auth::locate_binary(bin_name).ok_or(ProfileCmdError::BinaryNotFound(bin_name))?;
             println!("-> Launching `{bin_name}` auth flow...");
             auth::run_login(backend, profile_path, &binary).await?;
             Ok(())
@@ -495,19 +519,18 @@ async fn show(cfg: &Config, id: &str) -> Result<(), ProfileCmdError> {
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "(never)".into())
     );
-    let any = AnyProfileId::parse(&r.id)
-        .map_err(|e| ProfileCmdError::BadId(format!("{e}")))?;
+    let any = AnyProfileId::parse(&r.id).map_err(|e| ProfileCmdError::BadId(format!("{e}")))?;
     let dir = cfg.anatta_home.join("profiles").join(any.as_str());
     println!("{:<22} {}", "path:", dir.display());
 
     // Overrides — only print non-None ones.
     let overrides: &[(&str, Option<&str>)] = &[
-        ("base_url:",       r.base_url_override.as_deref()),
-        ("model:",          r.model_override.as_deref()),
+        ("base_url:", r.base_url_override.as_deref()),
+        ("model:", r.model_override.as_deref()),
         ("small_fast_model:", r.small_fast_model_override.as_deref()),
-        ("opus_model:",     r.default_opus_model_override.as_deref()),
-        ("sonnet_model:",   r.default_sonnet_model_override.as_deref()),
-        ("haiku_model:",    r.default_haiku_model_override.as_deref()),
+        ("opus_model:", r.default_opus_model_override.as_deref()),
+        ("sonnet_model:", r.default_sonnet_model_override.as_deref()),
+        ("haiku_model:", r.default_haiku_model_override.as_deref()),
         ("subagent_model:", r.subagent_model_override.as_deref()),
     ];
     let any_override = overrides.iter().any(|(_, v)| v.is_some());

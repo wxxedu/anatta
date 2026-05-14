@@ -52,7 +52,11 @@ fn strip_reasoning_round_trips_every_fixture() {
         return;
     };
     let files = collect_jsonl_files(&root);
-    assert!(!files.is_empty(), "no .jsonl files under {}", root.display());
+    assert!(
+        !files.is_empty(),
+        "no .jsonl files under {}",
+        root.display()
+    );
 
     let mut summary = Vec::new();
     for file in &files {

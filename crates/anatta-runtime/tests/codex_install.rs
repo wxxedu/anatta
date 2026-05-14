@@ -10,7 +10,7 @@
 #![cfg(feature = "installer")]
 
 use anatta_runtime::codex::CodexDistribution;
-use anatta_runtime::distribution::{install, VersionRequest};
+use anatta_runtime::distribution::{VersionRequest, install};
 
 #[tokio::test]
 #[ignore = "downloads ~75 MB from GitHub; run with --ignored"]
@@ -36,7 +36,11 @@ async fn install_codex_0_125_0_works_end_to_end() {
         .arg("--version")
         .output()
         .expect("spawn codex");
-    assert!(output.status.success(), "codex --version exit: {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "codex --version exit: {:?}",
+        output.status
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("0.125.0"),

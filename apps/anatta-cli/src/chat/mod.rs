@@ -242,7 +242,10 @@ async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
         return Ok(());
     }
     let now = Utc::now();
-    println!("{:<20} {:<22} {:<14} STATUS", "NAME", "PROFILE", "LAST USED");
+    println!(
+        "{:<20} {:<22} {:<14} STATUS",
+        "NAME", "PROFILE", "LAST USED"
+    );
     for row in rows {
         let status = if SessionLock::is_held(&cfg.anatta_home, &row.name) {
             "🔒 in use".to_owned()

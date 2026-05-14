@@ -56,7 +56,9 @@ fn parses_real_claude_sessions() {
     let mut failures: Vec<(PathBuf, usize, String, String)> = Vec::new();
 
     for file in &files {
-        let Ok(content) = fs::read_to_string(file) else { continue };
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
+        };
         for (i, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;

@@ -61,17 +61,17 @@ pub struct ProfileRecord {
     pub last_used_at: Option<DateTime<Utc>>,
 
     pub provider: String,
-    pub base_url_override:             Option<String>,
-    pub model_override:                Option<String>,
-    pub small_fast_model_override:     Option<String>,
-    pub default_opus_model_override:   Option<String>,
+    pub base_url_override: Option<String>,
+    pub model_override: Option<String>,
+    pub small_fast_model_override: Option<String>,
+    pub default_opus_model_override: Option<String>,
     pub default_sonnet_model_override: Option<String>,
-    pub default_haiku_model_override:  Option<String>,
-    pub subagent_model_override:       Option<String>,
+    pub default_haiku_model_override: Option<String>,
+    pub subagent_model_override: Option<String>,
 
     /// Family override (NULL = derive from (backend, provider)). Added
     /// in migration 0006. Valid: 'a-native'|'a-compat'|'o-native'|'o-compat'.
-    pub family_override:               Option<String>,
+    pub family_override: Option<String>,
 }
 
 /// What the caller passes to insert a new row.
@@ -83,14 +83,14 @@ pub struct NewProfile<'a> {
     pub auth_method: AuthMethod,
 
     pub provider: &'a str,
-    pub base_url_override:             Option<&'a str>,
-    pub model_override:                Option<&'a str>,
-    pub small_fast_model_override:     Option<&'a str>,
-    pub default_opus_model_override:   Option<&'a str>,
+    pub base_url_override: Option<&'a str>,
+    pub model_override: Option<&'a str>,
+    pub small_fast_model_override: Option<&'a str>,
+    pub default_opus_model_override: Option<&'a str>,
     pub default_sonnet_model_override: Option<&'a str>,
-    pub default_haiku_model_override:  Option<&'a str>,
-    pub subagent_model_override:       Option<&'a str>,
-    pub family_override:               Option<&'a str>,
+    pub default_haiku_model_override: Option<&'a str>,
+    pub subagent_model_override: Option<&'a str>,
+    pub family_override: Option<&'a str>,
 }
 
 /// Internal flat row, populated directly by `sqlx::query_as!`.
@@ -102,14 +102,14 @@ struct ProfileRow {
     created_at: String,
     last_used_at: Option<String>,
     provider: String,
-    base_url_override:             Option<String>,
-    model_override:                Option<String>,
-    small_fast_model_override:     Option<String>,
-    default_opus_model_override:   Option<String>,
+    base_url_override: Option<String>,
+    model_override: Option<String>,
+    small_fast_model_override: Option<String>,
+    default_opus_model_override: Option<String>,
     default_sonnet_model_override: Option<String>,
-    default_haiku_model_override:  Option<String>,
-    subagent_model_override:       Option<String>,
-    family_override:               Option<String>,
+    default_haiku_model_override: Option<String>,
+    subagent_model_override: Option<String>,
+    family_override: Option<String>,
 }
 
 impl ProfileRow {
@@ -122,14 +122,14 @@ impl ProfileRow {
             id: self.id,
             name: self.name,
             provider: self.provider,
-            base_url_override:             self.base_url_override,
-            model_override:                self.model_override,
-            small_fast_model_override:     self.small_fast_model_override,
-            default_opus_model_override:   self.default_opus_model_override,
+            base_url_override: self.base_url_override,
+            model_override: self.model_override,
+            small_fast_model_override: self.small_fast_model_override,
+            default_opus_model_override: self.default_opus_model_override,
             default_sonnet_model_override: self.default_sonnet_model_override,
-            default_haiku_model_override:  self.default_haiku_model_override,
-            subagent_model_override:       self.subagent_model_override,
-            family_override:               self.family_override,
+            default_haiku_model_override: self.default_haiku_model_override,
+            subagent_model_override: self.subagent_model_override,
+            family_override: self.family_override,
         })
     }
 }
@@ -386,7 +386,7 @@ mod tests {
                 default_sonnet_model_override: None,
                 default_haiku_model_override: None,
                 subagent_model_override: None,
-            family_override: None,
+                family_override: None,
             })
             .await
             .unwrap_err();
@@ -447,7 +447,10 @@ mod tests {
         let got = s.get_profile("claude-DSeek01").await.unwrap().unwrap();
         assert_eq!(got.provider, "deepseek");
         assert_eq!(got.model_override.as_deref(), Some("deepseek-v4-pro"));
-        assert_eq!(got.default_haiku_model_override.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            got.default_haiku_model_override.as_deref(),
+            Some("deepseek-v4-flash")
+        );
         assert!(got.base_url_override.is_none());
         assert!(got.subagent_model_override.is_none());
     }

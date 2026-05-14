@@ -55,20 +55,25 @@ fn assistant(a: &history::AssistantEvent, ctx: &ProjectionContext) -> Vec<AgentE
     for block in &a.message.content {
         let payload = match block {
             history::AssistantContentBlock::Thinking { thinking, .. } => {
-                AgentEventPayload::Thinking { text: thinking.clone() }
+                AgentEventPayload::Thinking {
+                    text: thinking.clone(),
+                }
             }
             history::AssistantContentBlock::Text { text } => {
                 AgentEventPayload::AssistantText { text: text.clone() }
             }
-            history::AssistantContentBlock::ToolUse { id, name, input, .. } => {
-                AgentEventPayload::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                }
-            }
+            history::AssistantContentBlock::ToolUse {
+                id, name, input, ..
+            } => AgentEventPayload::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
         };
-        out.push(AgentEvent { envelope: env.clone(), payload });
+        out.push(AgentEvent {
+            envelope: env.clone(),
+            payload,
+        });
     }
 
     out.push(AgentEvent {
@@ -199,9 +204,16 @@ struct BlockAcc {
 
 #[derive(Debug)]
 enum BlockAccKind {
-    Text { text: String },
-    Thinking { text: String },
-    ToolUse { tool_use_id: String, partial_json: String },
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+    },
+    ToolUse {
+        tool_use_id: String,
+        partial_json: String,
+    },
     /// Block types we don't emit deltas for (redacted_thinking,
     /// container_upload, mcp_*, etc.). We still record the slot so
     /// content_block_stop won't underflow.
@@ -230,10 +242,17 @@ impl StreamProjector {
         );
 
         match &s.event {
-            Inner::ContentBlockStart { index, content_block } => {
+            Inner::ContentBlockStart {
+                index,
+                content_block,
+            } => {
                 let kind = match content_block {
-                    Cb::Text { .. } => BlockAccKind::Text { text: String::new() },
-                    Cb::Thinking { .. } => BlockAccKind::Thinking { text: String::new() },
+                    Cb::Text { .. } => BlockAccKind::Text {
+                        text: String::new(),
+                    },
+                    Cb::Thinking { .. } => BlockAccKind::Thinking {
+                        text: String::new(),
+                    },
                     Cb::ToolUse { id, .. }
                     | Cb::ServerToolUse { id, .. }
                     | Cb::McpToolUse { id, .. } => BlockAccKind::ToolUse {
@@ -260,10 +279,7 @@ impl StreamProjector {
                             },
                         }]
                     }
-                    (
-                        BlockAccKind::Thinking { text },
-                        Dl::ThinkingDelta { thinking: chunk },
-                    ) => {
+                    (BlockAccKind::Thinking { text }, Dl::ThinkingDelta { thinking: chunk }) => {
                         text.push_str(chunk);
                         vec![AgentEvent {
                             envelope: env,
@@ -274,8 +290,13 @@ impl StreamProjector {
                         }]
                     }
                     (
-                        BlockAccKind::ToolUse { tool_use_id, partial_json },
-                        Dl::InputJsonDelta { partial_json: chunk },
+                        BlockAccKind::ToolUse {
+                            tool_use_id,
+                            partial_json,
+                        },
+                        Dl::InputJsonDelta {
+                            partial_json: chunk,
+                        },
                     ) => {
                         partial_json.push_str(chunk);
                         vec![AgentEvent {
@@ -315,12 +336,7 @@ impl Projector for StreamProjector {
             User(u) => stream_user(u, ctx),
             Result(r) => stream_result(r, ctx),
             RateLimitEvent(r) => vec![AgentEvent {
-                envelope: stream_envelope(
-                    r.session_id.clone(),
-                    Some(r.uuid.clone()),
-                    None,
-                    ctx,
-                ),
+                envelope: stream_envelope(r.session_id.clone(), Some(r.uuid.clone()), None, ctx),
                 payload: AgentEventPayload::RateLimit {
                     limit_kind: r
                         .rate_limit_info
@@ -337,10 +353,17 @@ impl Projector for StreamProjector {
             }],
             StreamEvent(s) => self.project_stream_event(s, ctx),
             // Hooks / control plane / progress indicators / keep-alive: skip.
-            ToolProgress(_) | ToolUseSummary(_) | AuthStatus(_)
-            | PromptSuggestion(_) | KeepAlive | ControlRequest(_)
-            | ControlResponse(_) | ControlCancelRequest(_)
-            | PostTurnSummary(_) | TaskSummary(_) | TranscriptMirror(_) => Vec::new(),
+            ToolProgress(_)
+            | ToolUseSummary(_)
+            | AuthStatus(_)
+            | PromptSuggestion(_)
+            | KeepAlive
+            | ControlRequest(_)
+            | ControlResponse(_)
+            | ControlCancelRequest(_)
+            | PostTurnSummary(_)
+            | TaskSummary(_)
+            | TranscriptMirror(_) => Vec::new(),
         }
     }
 }
@@ -388,38 +411,56 @@ fn stream_assistant(a: &stream::AssistantMessage, ctx: &ProjectionContext) -> Ve
             stream::BetaContentBlock::Text { text, .. } => {
                 AgentEventPayload::AssistantText { text: text.clone() }
             }
-            stream::BetaContentBlock::Thinking { thinking, .. } => {
-                AgentEventPayload::Thinking { text: thinking.clone() }
+            stream::BetaContentBlock::Thinking { thinking, .. } => AgentEventPayload::Thinking {
+                text: thinking.clone(),
+            },
+            stream::BetaContentBlock::ToolUse {
+                id, name, input, ..
             }
-            stream::BetaContentBlock::ToolUse { id, name, input, .. }
-            | stream::BetaContentBlock::ServerToolUse { id, name, input, .. } => {
-                AgentEventPayload::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                }
-            }
-            stream::BetaContentBlock::McpToolUse { id, name, server_name, input } => {
-                AgentEventPayload::ToolUse {
-                    id: id.clone(),
-                    name: format!("mcp/{server_name}/{name}"),
-                    input: input.clone(),
-                }
-            }
+            | stream::BetaContentBlock::ServerToolUse {
+                id, name, input, ..
+            } => AgentEventPayload::ToolUse {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            },
+            stream::BetaContentBlock::McpToolUse {
+                id,
+                name,
+                server_name,
+                input,
+            } => AgentEventPayload::ToolUse {
+                id: id.clone(),
+                name: format!("mcp/{server_name}/{name}"),
+                input: input.clone(),
+            },
             _ => continue,
         };
-        out.push(AgentEvent { envelope: env.clone(), payload });
+        out.push(AgentEvent {
+            envelope: env.clone(),
+            payload,
+        });
     }
     out
 }
 
 fn stream_user(u: &stream::UserMessage, ctx: &ProjectionContext) -> Vec<AgentEvent> {
-    let session_id = u.session_id.clone().unwrap_or_else(|| ctx.session_id.clone());
-    let env = stream_envelope(session_id, u.uuid.clone(), u.parent_tool_use_id.clone(), ctx);
+    let session_id = u
+        .session_id
+        .clone()
+        .unwrap_or_else(|| ctx.session_id.clone());
+    let env = stream_envelope(
+        session_id,
+        u.uuid.clone(),
+        u.parent_tool_use_id.clone(),
+        ctx,
+    );
     if let Some(text) = u.message.content.as_str() {
         return vec![AgentEvent {
             envelope: env,
-            payload: AgentEventPayload::UserPrompt { text: text.to_owned() },
+            payload: AgentEventPayload::UserPrompt {
+                text: text.to_owned(),
+            },
         }];
     }
     if let Some(arr) = u.message.content.as_array() {
@@ -441,7 +482,10 @@ fn stream_user(u: &stream::UserMessage, ctx: &ProjectionContext) -> Vec<AgentEve
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_owned();
-                    let is_error = item.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let is_error = item
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let (text, structured) =
                         if let Some(s) = item.get("content").and_then(|v| v.as_str()) {
                             (Some(s.to_owned()), None)
@@ -504,7 +548,10 @@ fn stream_result(r: &stream::ResultMessage, ctx: &ProjectionContext) -> Vec<Agen
     }
     out.push(AgentEvent {
         envelope: env,
-        payload: AgentEventPayload::TurnCompleted { stop_reason, is_error },
+        payload: AgentEventPayload::TurnCompleted {
+            stop_reason,
+            is_error,
+        },
     });
     out
 }
@@ -525,7 +572,9 @@ fn stream_envelope(
 }
 
 fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 fn rate_limit_status_str(s: &stream::RateLimitStatus) -> &'static str {
@@ -559,10 +608,22 @@ mod tests {
         let mut p = HistoryProjector::new();
         let agent_events = p.project(&ev, &ctx());
         assert_eq!(agent_events.len(), 4);
-        assert!(matches!(agent_events[0].payload, AgentEventPayload::Thinking { .. }));
-        assert!(matches!(agent_events[1].payload, AgentEventPayload::AssistantText { .. }));
-        assert!(matches!(agent_events[2].payload, AgentEventPayload::ToolUse { .. }));
-        assert!(matches!(agent_events[3].payload, AgentEventPayload::Usage { .. }));
+        assert!(matches!(
+            agent_events[0].payload,
+            AgentEventPayload::Thinking { .. }
+        ));
+        assert!(matches!(
+            agent_events[1].payload,
+            AgentEventPayload::AssistantText { .. }
+        ));
+        assert!(matches!(
+            agent_events[2].payload,
+            AgentEventPayload::ToolUse { .. }
+        ));
+        assert!(matches!(
+            agent_events[3].payload,
+            AgentEventPayload::Usage { .. }
+        ));
     }
 
     #[test]
@@ -584,7 +645,12 @@ mod tests {
         let evs = HistoryProjector::new().project(&ev, &ctx());
         assert_eq!(evs.len(), 1);
         match &evs[0].payload {
-            AgentEventPayload::ToolResult { tool_use_id, success, text, .. } => {
+            AgentEventPayload::ToolResult {
+                tool_use_id,
+                success,
+                text,
+                ..
+            } => {
                 assert_eq!(tool_use_id, "toolu_1");
                 assert!(*success);
                 assert_eq!(text.as_deref(), Some("output"));
@@ -601,7 +667,11 @@ mod tests {
         let evs = p.project(&ev, &ctx());
         assert_eq!(evs.len(), 1);
         match &evs[0].payload {
-            AgentEventPayload::SessionStarted { cwd, model, tools_available } => {
+            AgentEventPayload::SessionStarted {
+                cwd,
+                model,
+                tools_available,
+            } => {
                 assert_eq!(cwd, "/x");
                 assert_eq!(model, "opus");
                 assert_eq!(tools_available.len(), 2);
@@ -645,7 +715,10 @@ mod tests {
         let evs = StreamProjector::new().project(&ev, &ctx());
         assert_eq!(evs.len(), 2);
         assert!(matches!(evs[0].payload, AgentEventPayload::Usage { .. }));
-        assert!(matches!(evs[1].payload, AgentEventPayload::TurnCompleted { .. }));
+        assert!(matches!(
+            evs[1].payload,
+            AgentEventPayload::TurnCompleted { .. }
+        ));
     }
 
     #[test]
@@ -695,7 +768,11 @@ mod tests {
         let ev: stream::ClaudeStreamEvent = serde_json::from_str(d1).unwrap();
         let evs = p.project(&ev, &c);
         match &evs[0].payload {
-            AgentEventPayload::ToolUseInputDelta { tool_use_id, partial_json, .. } => {
+            AgentEventPayload::ToolUseInputDelta {
+                tool_use_id,
+                partial_json,
+                ..
+            } => {
                 assert_eq!(tool_use_id, "toolu_1");
                 assert_eq!(partial_json, "{\"command\":");
             }

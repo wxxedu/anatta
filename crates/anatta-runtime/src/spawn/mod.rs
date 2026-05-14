@@ -33,8 +33,8 @@ mod stderr_buf;
 
 pub use claude::ClaudeLaunch;
 pub use claude_interactive::{
-    encode_prompt_for_test, run_tail_for_test, ClaudeInteractiveInterruptHandle,
-    ClaudeInteractiveLaunch, ClaudeInteractiveSession, InteractiveTurnHandle,
+    ClaudeInteractiveInterruptHandle, ClaudeInteractiveLaunch, ClaudeInteractiveSession,
+    InteractiveTurnHandle, encode_prompt_for_test, run_tail_for_test,
 };
 pub use codex::{CodexInterruptHandle, CodexLaunch, PersistentCodexSession, TurnHandle};
 pub use ids::{ClaudeSessionId, CodexThreadId};
@@ -194,7 +194,9 @@ pub enum SpawnError {
     ProfilePathInvalid(PathBuf),
     #[error("failed to spawn child process: {0}")]
     ProcessSpawn(#[source] std::io::Error),
-    #[error("child exited before emitting any event (status={status:?}); stderr tail: {stderr_tail}")]
+    #[error(
+        "child exited before emitting any event (status={status:?}); stderr tail: {stderr_tail}"
+    )]
     ChildExitedEarly {
         status: Option<i32>,
         stderr_tail: String,
@@ -202,10 +204,7 @@ pub enum SpawnError {
     #[error("first event from backend did not parse as expected: {0}")]
     ParseFirstEvent(#[source] serde_json::Error),
     #[error("first event was {got:?}, expected {expected}")]
-    UnexpectedFirstEvent {
-        expected: &'static str,
-        got: String,
-    },
+    UnexpectedFirstEvent { expected: &'static str, got: String },
     #[error("first event carried no session_id (or thread_id)")]
     MissingSessionId,
     #[error("io: {0}")]
@@ -227,22 +226,23 @@ async fn finalize_first_event_session(
     mut handles: pipeline::PipelineHandles,
 ) -> Result<AgentSession, SpawnError> {
     let started_at = std::time::Instant::now();
-    let first = handles.events_rx.recv().await.ok_or_else(|| {
-        SpawnError::ChildExitedEarly {
+    let first = handles
+        .events_rx
+        .recv()
+        .await
+        .ok_or_else(|| SpawnError::ChildExitedEarly {
             status: None,
             stderr_tail: handles.stderr.snapshot(),
-        }
-    })?;
+        })?;
     if first.envelope.session_id.is_empty() {
         return Err(SpawnError::MissingSessionId);
     }
     let session_id = first.envelope.session_id.clone();
 
     let (consumer_tx, consumer_rx) = mpsc::channel::<AgentEvent>(64);
-    consumer_tx
-        .send(first)
-        .await
-        .map_err(|_| SpawnError::Io(std::io::Error::other("consumer channel closed during init")))?;
+    consumer_tx.send(first).await.map_err(|_| {
+        SpawnError::Io(std::io::Error::other("consumer channel closed during init"))
+    })?;
     tokio::spawn(async move {
         while let Some(e) = handles.events_rx.recv().await {
             if consumer_tx.send(e).await.is_err() {

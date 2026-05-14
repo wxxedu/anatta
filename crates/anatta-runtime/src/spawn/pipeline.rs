@@ -7,16 +7,16 @@
 //! This keeps the closure ergonomic (just transformation) while still
 //! using async backpressure on the channel.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anatta_core::AgentEvent;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
-use super::stderr_buf;
 use super::SpawnError;
+use super::stderr_buf;
 
 pub struct PipelineHandles {
     pub child: Child,

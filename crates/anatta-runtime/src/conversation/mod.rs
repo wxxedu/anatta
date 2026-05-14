@@ -28,6 +28,6 @@ pub mod sidecar;
 
 pub use sidecar::{copy_dir_recursive, sync_sidecar_one_way};
 
-pub use absorb::{absorb_after_turn, AbsorbError, AbsorbInput, AbsorbOutcome};
+pub use absorb::{AbsorbError, AbsorbInput, AbsorbOutcome, absorb_after_turn};
 pub use paths::{encode_cwd, working_jsonl_path, working_sidecar_dir};
-pub use render::{render_into_working, PriorSegmentInput, RenderError, RenderOutcome};
+pub use render::{PriorSegmentInput, RenderError, RenderOutcome, render_into_working};

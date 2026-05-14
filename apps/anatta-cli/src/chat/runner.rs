@@ -23,11 +23,11 @@ use anatta_store::conversation::{ConversationRecord, NewConversation};
 use anatta_store::profile::ProfileRecord;
 use tokio::sync::Notify;
 
-use super::input::{InputReader, ReadOutcome};
-use super::render::line::LineRenderer;
-use super::render::EventRenderer;
-use super::slash::{self, SlashOutcome};
 use super::ChatError;
+use super::input::{InputReader, ReadOutcome};
+use super::render::EventRenderer;
+use super::render::line::LineRenderer;
+use super::slash::{self, SlashOutcome};
 use crate::config::Config;
 use crate::conversation as orch;
 use crate::launch;
@@ -82,7 +82,11 @@ pub(crate) async fn run_new(
     drive_chat(conv, profile, per_turn, cfg, /* resumed = */ false).await
 }
 
-pub(crate) async fn run_resume(name: String, per_turn: bool, cfg: &Config) -> Result<(), ChatError> {
+pub(crate) async fn run_resume(
+    name: String,
+    per_turn: bool,
+    cfg: &Config,
+) -> Result<(), ChatError> {
     let conv = cfg
         .store
         .get_conversation(&name)
@@ -156,9 +160,11 @@ async fn run_chat(
         ))));
     }
     // Re-fetch segment row since render may have updated offsets.
-    if let Some(s) = cfg.store.active_segment(
-        conv_meta.id.as_deref().expect("conv_meta.id populated"),
-    ).await? {
+    if let Some(s) = cfg
+        .store
+        .active_segment(conv_meta.id.as_deref().expect("conv_meta.id populated"))
+        .await?
+    {
         active_seg = s;
     }
 
@@ -213,9 +219,13 @@ async fn run_chat(
                         let cross_engine = new_profile.backend != profile.backend;
                         // Final absorb of old segment before close (also harvests
                         // codex sub-agents if relevant).
-                        if let Err(e) =
-                            orch::absorb_after_turn_for_session(cfg, &conv_meta, &profile, &active_seg)
-                                .await
+                        if let Err(e) = orch::absorb_after_turn_for_session(
+                            cfg,
+                            &conv_meta,
+                            &profile,
+                            &active_seg,
+                        )
+                        .await
                         {
                             eprintln!("✗ pre-swap absorb failed: {e}");
                             continue;
@@ -242,7 +252,10 @@ async fn run_chat(
                         // (set in open_segment_for_swap) so render can write the
                         // working file under a stable resume coordinate.
                         let render_outcome = match orch::render_for_session(
-                            cfg, &conv_meta, &new_profile, &new_active.id,
+                            cfg,
+                            &conv_meta,
+                            &new_profile,
+                            &new_active.id,
                         )
                         .await
                         {
@@ -265,7 +278,9 @@ async fn run_chat(
                             anatta_runtime::conversation::RenderOutcome::SkippedFirstTurn
                         ) || matches!(
                             render_outcome,
-                            anatta_runtime::conversation::RenderOutcome::Rendered { working_bytes: 0 }
+                            anatta_runtime::conversation::RenderOutcome::Rendered {
+                                working_bytes: 0
+                            }
                         );
                         // Re-fetch to pick up the minted engine_session_id.
                         let new_active_after_render = cfg
@@ -327,9 +342,7 @@ async fn run_chat(
                         {
                             active_seg = s;
                         }
-                        if let Ok(Some(m)) =
-                            cfg.store.get_conversation_metadata(&conv.name).await
-                        {
+                        if let Ok(Some(m)) = cfg.store.get_conversation_metadata(&conv.name).await {
                             conv_meta = m;
                         }
                         continue;
@@ -350,7 +363,10 @@ async fn run_chat(
                 if backend_session_id.is_none() {
                     if let Some(id) = session.thread_id() {
                         orch::set_active_segment_engine_id_if_needed(
-                            cfg, &conv.name, &active_seg, id,
+                            cfg,
+                            &conv.name,
+                            &active_seg,
+                            id,
                         )
                         .await
                         .map_err(|e| ChatError::Io(std::io::Error::other(e.to_string())))?;
@@ -363,9 +379,7 @@ async fn run_chat(
                         {
                             active_seg = s;
                         }
-                        if let Ok(Some(m)) =
-                            cfg.store.get_conversation_metadata(&conv.name).await
-                        {
+                        if let Ok(Some(m)) = cfg.store.get_conversation_metadata(&conv.name).await {
                             conv_meta = m;
                         }
                     }
@@ -398,10 +412,7 @@ async fn run_chat(
     result
 }
 
-async fn drain_turn(
-    mut turn: TurnEvents,
-    renderer: &mut LineRenderer,
-) -> Result<(), ChatError> {
+async fn drain_turn(mut turn: TurnEvents, renderer: &mut LineRenderer) -> Result<(), ChatError> {
     let cancel = Arc::new(Notify::new());
     let cancel_in_task = cancel.clone();
     let ctrl_c_task = tokio::spawn(async move {

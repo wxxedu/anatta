@@ -10,14 +10,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anatta_core::{AgentEvent, AgentEventEnvelope, AgentEventPayload, Backend, ProjectionContext, Projector};
+use anatta_core::{
+    AgentEvent, AgentEventEnvelope, AgentEventPayload, Backend, ProjectionContext, Projector,
+};
 use chrono::Utc;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
-use crate::claude::history::ClaudeEvent;
 use crate::claude::HistoryProjector;
+use crate::claude::history::ClaudeEvent;
 use crate::conversation::paths::working_jsonl_path;
 use crate::profile::ClaudeProfile;
 use crate::spawn::stderr_buf;
@@ -62,11 +64,7 @@ pub fn encode_prompt_for_test(prompt: &str) -> Vec<u8> {
 /// Polling interval: 25 ms — cheap (the file is local and kernel-cached)
 /// and fast enough that turn boundaries feel immediate. We re-open the
 /// file each tick rather than holding it open while idle.
-async fn run_tail(
-    path: PathBuf,
-    events_tx: mpsc::Sender<AgentEvent>,
-    session_id: String,
-) {
+async fn run_tail(path: PathBuf, events_tx: mpsc::Sender<AgentEvent>, session_id: String) {
     let mut projector = HistoryProjector::new();
     let mut byte_offset: u64 = 0;
     let mut line_buf = String::new();
@@ -81,7 +79,11 @@ async fn run_tail(
             }
         };
         let mut reader = BufReader::new(file);
-        if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_err() {
+        if reader
+            .seek(std::io::SeekFrom::Start(byte_offset))
+            .await
+            .is_err()
+        {
             tokio::time::sleep(interval).await;
             continue;
         }
@@ -413,7 +415,11 @@ async fn persistent_tail_loop(
             }
         };
         let mut reader = BufReader::new(file);
-        if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_err() {
+        if reader
+            .seek(std::io::SeekFrom::Start(byte_offset))
+            .await
+            .is_err()
+        {
             tokio::time::sleep(interval).await;
             continue;
         }
@@ -539,9 +545,9 @@ impl ClaudeInteractiveSession {
             Ok(joined) => {
                 let status = joined
                     .map_err(|e| SpawnError::Io(std::io::Error::other(e)))?
-                    .map_err(|e| SpawnError::Io(std::io::Error::other(format!(
-                        "child.wait: {e}"
-                    ))))?;
+                    .map_err(|e| {
+                        SpawnError::Io(std::io::Error::other(format!("child.wait: {e}")))
+                    })?;
                 Ok(ExitInfo {
                     exit_code: Some(status.exit_code() as i32),
                     signal: None,
@@ -597,7 +603,9 @@ impl ClaudeInteractiveSession {
             .is_err()
         {
             *self.active_turn.lock().await = None;
-            return Err(SpawnError::Io(std::io::Error::other("pty writer task gone")));
+            return Err(SpawnError::Io(std::io::Error::other(
+                "pty writer task gone",
+            )));
         }
 
         Ok(InteractiveTurnHandle { events_rx })

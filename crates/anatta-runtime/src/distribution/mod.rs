@@ -22,7 +22,7 @@ mod platform;
 mod tests;
 
 pub use error::DistError;
-pub use platform::{detect_platform, Arch, Libc, Os, Platform};
+pub use platform::{Arch, Libc, Os, Platform, detect_platform};
 
 use std::path::{Path, PathBuf};
 
@@ -127,19 +127,25 @@ pub async fn install_with_progress(
     on_progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<InstalledRuntime, DistError> {
     let version = backend.resolve_version(request).await?;
-    on_progress(Progress::ResolvedVersion { version: version.clone() });
+    on_progress(Progress::ResolvedVersion {
+        version: version.clone(),
+    });
 
     let platform = detect_platform()?;
     on_progress(Progress::DetectedPlatform { platform });
 
     let info = backend.download_info(&version, platform).await?;
-    on_progress(Progress::FetchingMetadata { url: info.url.clone() });
+    on_progress(Progress::FetchingMetadata {
+        url: info.url.clone(),
+    });
 
     let install_dir = install_root.join(backend.name()).join(&version);
     let binary_path = install_dir.join(backend.final_binary_relpath(platform));
 
     if binary_path.exists() {
-        on_progress(Progress::AlreadyInstalled { path: binary_path.clone() });
+        on_progress(Progress::AlreadyInstalled {
+            path: binary_path.clone(),
+        });
         return Ok(InstalledRuntime {
             backend: backend.name().to_owned(),
             version,
@@ -151,7 +157,9 @@ pub async fn install_with_progress(
     on_progress(Progress::DownloadComplete { bytes: bytes.len() });
 
     fetch::install_payload(&info, &bytes, &install_dir, &binary_path).await?;
-    on_progress(Progress::Installed { path: binary_path.clone() });
+    on_progress(Progress::Installed {
+        path: binary_path.clone(),
+    });
 
     Ok(InstalledRuntime {
         backend: backend.name().to_owned(),

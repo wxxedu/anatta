@@ -21,22 +21,22 @@ pub enum Tier {
 /// fit the Anthropic namespace go in `extra_env`.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderSpec {
-    pub id:           &'static str,                  // "anthropic", "deepseek", ...
-    pub display_name: &'static str,                  // "Anthropic", "DeepSeek", ...
-    pub backend:      &'static str,                  // "claude" / "codex"
-    pub tier:         Tier,
+    pub id: &'static str,           // "anthropic", "deepseek", ...
+    pub display_name: &'static str, // "Anthropic", "DeepSeek", ...
+    pub backend: &'static str,      // "claude" / "codex"
+    pub tier: Tier,
     /// Auth methods supported by this provider. CLI rejects any choice
     /// not in this list. Currently "login" / "api_key".
     pub supported_auth: &'static [&'static str],
 
     // ── Anthropic-canonical env vars (None = don't set) ──────────────
-    pub base_url:             Option<&'static str>,  // ANTHROPIC_BASE_URL
-    pub model:                Option<&'static str>,  // ANTHROPIC_MODEL
-    pub small_fast_model:     Option<&'static str>,  // ANTHROPIC_SMALL_FAST_MODEL
-    pub default_opus_model:   Option<&'static str>,  // ANTHROPIC_DEFAULT_OPUS_MODEL
-    pub default_sonnet_model: Option<&'static str>,  // ANTHROPIC_DEFAULT_SONNET_MODEL
-    pub default_haiku_model:  Option<&'static str>,  // ANTHROPIC_DEFAULT_HAIKU_MODEL
-    pub subagent_model:       Option<&'static str>,  // CLAUDE_CODE_SUBAGENT_MODEL
+    pub base_url: Option<&'static str>, // ANTHROPIC_BASE_URL
+    pub model: Option<&'static str>,    // ANTHROPIC_MODEL
+    pub small_fast_model: Option<&'static str>, // ANTHROPIC_SMALL_FAST_MODEL
+    pub default_opus_model: Option<&'static str>, // ANTHROPIC_DEFAULT_OPUS_MODEL
+    pub default_sonnet_model: Option<&'static str>, // ANTHROPIC_DEFAULT_SONNET_MODEL
+    pub default_haiku_model: Option<&'static str>, // ANTHROPIC_DEFAULT_HAIKU_MODEL
+    pub subagent_model: Option<&'static str>, // CLAUDE_CODE_SUBAGENT_MODEL
 
     // ── Long tail: vendor-specific extras ────────────────────────────
     pub extra_env: &'static [(&'static str, &'static str)],
@@ -46,13 +46,13 @@ pub struct ProviderSpec {
 /// to the [`ProviderSpec`] default". Stored in the `profile` DB row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Overrides {
-    pub base_url:             Option<String>,
-    pub model:                Option<String>,
-    pub small_fast_model:     Option<String>,
-    pub default_opus_model:   Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub small_fast_model: Option<String>,
+    pub default_opus_model: Option<String>,
     pub default_sonnet_model: Option<String>,
-    pub default_haiku_model:  Option<String>,
-    pub subagent_model:       Option<String>,
+    pub default_haiku_model: Option<String>,
+    pub subagent_model: Option<String>,
 }
 
 /// Resolved spawn-time env: `(name, value)` pairs to set on the child.
@@ -67,119 +67,113 @@ pub struct ProviderEnv {
 pub const PROVIDERS: &[ProviderSpec] = &[
     // ── Tier 1 ──────────────────────────────────────────────────────
     ProviderSpec {
-        id:           "anthropic",
+        id: "anthropic",
         display_name: "Anthropic",
-        backend:      "claude",
-        tier:         Tier::T1,
+        backend: "claude",
+        tier: Tier::T1,
         supported_auth: &["login", "api_key"],
-        base_url:             None,
-        model:                None,
-        small_fast_model:     None,
-        default_opus_model:   None,
+        base_url: None,
+        model: None,
+        small_fast_model: None,
+        default_opus_model: None,
         default_sonnet_model: None,
-        default_haiku_model:  None,
-        subagent_model:       None,
+        default_haiku_model: None,
+        subagent_model: None,
         extra_env: &[],
     },
     ProviderSpec {
-        id:           "openai",
+        id: "openai",
         display_name: "OpenAI",
-        backend:      "codex",
-        tier:         Tier::T1,
+        backend: "codex",
+        tier: Tier::T1,
         supported_auth: &["login", "api_key"],
-        base_url:             None,
-        model:                None,
-        small_fast_model:     None,
-        default_opus_model:   None,
+        base_url: None,
+        model: None,
+        small_fast_model: None,
+        default_opus_model: None,
         default_sonnet_model: None,
-        default_haiku_model:  None,
-        subagent_model:       None,
+        default_haiku_model: None,
+        subagent_model: None,
         extra_env: &[],
     },
     // ── Tier 2 ──────────────────────────────────────────────────────
     ProviderSpec {
-        id:           "deepseek",
+        id: "deepseek",
         display_name: "DeepSeek",
-        backend:      "claude",
-        tier:         Tier::T2,
+        backend: "claude",
+        tier: Tier::T2,
         supported_auth: &["api_key"],
-        base_url:             Some("https://api.deepseek.com/anthropic"),
-        model:                Some("deepseek-v4-pro"),
-        small_fast_model:     None,
-        default_opus_model:   Some("deepseek-v4-pro"),
+        base_url: Some("https://api.deepseek.com/anthropic"),
+        model: Some("deepseek-v4-pro"),
+        small_fast_model: None,
+        default_opus_model: Some("deepseek-v4-pro"),
         default_sonnet_model: Some("deepseek-v4-pro"),
-        default_haiku_model:  Some("deepseek-v4-flash"),
-        subagent_model:       Some("deepseek-v4-flash"),
-        extra_env: &[
-            ("CLAUDE_CODE_EFFORT_LEVEL", "max"),
-        ],
+        default_haiku_model: Some("deepseek-v4-flash"),
+        subagent_model: Some("deepseek-v4-flash"),
+        extra_env: &[("CLAUDE_CODE_EFFORT_LEVEL", "max")],
     },
     // ── Tier 3 ──────────────────────────────────────────────────────
     ProviderSpec {
-        id:           "kimi",
+        id: "kimi",
         display_name: "Kimi (Moonshot)",
-        backend:      "claude",
-        tier:         Tier::T3,
+        backend: "claude",
+        tier: Tier::T3,
         supported_auth: &["api_key"],
-        base_url:             Some("https://api.moonshot.ai/anthropic"),
-        model:                Some("kimi-k2.5"),
-        small_fast_model:     None,
-        default_opus_model:   Some("kimi-k2.5"),
+        base_url: Some("https://api.moonshot.ai/anthropic"),
+        model: Some("kimi-k2.5"),
+        small_fast_model: None,
+        default_opus_model: Some("kimi-k2.5"),
         default_sonnet_model: Some("kimi-k2.5"),
-        default_haiku_model:  Some("kimi-k2.5"),
-        subagent_model:       Some("kimi-k2.5"),
-        extra_env: &[
-            ("ENABLE_TOOL_SEARCH", "false"),
-        ],
+        default_haiku_model: Some("kimi-k2.5"),
+        subagent_model: Some("kimi-k2.5"),
+        extra_env: &[("ENABLE_TOOL_SEARCH", "false")],
     },
     ProviderSpec {
-        id:           "minimax",
+        id: "minimax",
         display_name: "MiniMax",
-        backend:      "claude",
-        tier:         Tier::T3,
+        backend: "claude",
+        tier: Tier::T3,
         supported_auth: &["api_key"],
-        base_url:             Some("https://api.minimax.io/anthropic"),
-        model:                Some("MiniMax-M2.7"),
-        small_fast_model:     None,
-        default_opus_model:   Some("MiniMax-M2.7"),
+        base_url: Some("https://api.minimax.io/anthropic"),
+        model: Some("MiniMax-M2.7"),
+        small_fast_model: None,
+        default_opus_model: Some("MiniMax-M2.7"),
         default_sonnet_model: Some("MiniMax-M2.7"),
-        default_haiku_model:  Some("MiniMax-M2.7"),
-        subagent_model:       None,
+        default_haiku_model: Some("MiniMax-M2.7"),
+        subagent_model: None,
         extra_env: &[
             ("API_TIMEOUT_MS", "3000000"),
             ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
         ],
     },
     ProviderSpec {
-        id:           "zai",
+        id: "zai",
         display_name: "Z.AI (智谱)",
-        backend:      "claude",
-        tier:         Tier::T3,
+        backend: "claude",
+        tier: Tier::T3,
         supported_auth: &["api_key"],
-        base_url:             Some("https://api.z.ai/api/anthropic"),
-        model:                None,                            // server-side mapping
-        small_fast_model:     None,
-        default_opus_model:   None,
+        base_url: Some("https://api.z.ai/api/anthropic"),
+        model: None, // server-side mapping
+        small_fast_model: None,
+        default_opus_model: None,
         default_sonnet_model: None,
-        default_haiku_model:  None,
-        subagent_model:       None,
-        extra_env: &[
-            ("API_TIMEOUT_MS", "3000000"),
-        ],
+        default_haiku_model: None,
+        subagent_model: None,
+        extra_env: &[("API_TIMEOUT_MS", "3000000")],
     },
     ProviderSpec {
-        id:           "custom",
+        id: "custom",
         display_name: "Custom (user-supplied base URL)",
-        backend:      "claude",
-        tier:         Tier::T3,
+        backend: "claude",
+        tier: Tier::T3,
         supported_auth: &["api_key"],
-        base_url:             None,                             // MUST be overridden on profile
-        model:                None,
-        small_fast_model:     None,
-        default_opus_model:   None,
+        base_url: None, // MUST be overridden on profile
+        model: None,
+        small_fast_model: None,
+        default_opus_model: None,
         default_sonnet_model: None,
-        default_haiku_model:  None,
-        subagent_model:       None,
+        default_haiku_model: None,
+        subagent_model: None,
         extra_env: &[],
     },
 ];
@@ -314,14 +308,21 @@ mod tests {
         assert_eq!(d.default_sonnet_model, Some("deepseek-v4-pro"));
         assert_eq!(d.default_haiku_model, Some("deepseek-v4-flash"));
         assert_eq!(d.subagent_model, Some("deepseek-v4-flash"));
-        assert!(d.extra_env.iter().any(|(k, v)| *k == "CLAUDE_CODE_EFFORT_LEVEL" && *v == "max"));
+        assert!(
+            d.extra_env
+                .iter()
+                .any(|(k, v)| *k == "CLAUDE_CODE_EFFORT_LEVEL" && *v == "max")
+        );
     }
 
     #[test]
     fn iter_for_backend_sorts_t1_first() {
         let claude_specs: Vec<&ProviderSpec> = iter_for_backend("claude").collect();
         assert!(!claude_specs.is_empty());
-        assert_eq!(claude_specs[0].id, "anthropic", "T1 anthropic must be first");
+        assert_eq!(
+            claude_specs[0].id, "anthropic",
+            "T1 anthropic must be first"
+        );
     }
 
     #[test]
@@ -332,7 +333,10 @@ mod tests {
     }
 
     fn vars_to_map(env: &ProviderEnv) -> std::collections::HashMap<&str, &str> {
-        env.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
+        env.vars
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
     }
 
     #[test]
@@ -340,11 +344,20 @@ mod tests {
         let spec = lookup("deepseek").unwrap();
         let env = ProviderEnv::build(spec, &Overrides::default(), "sk-test".to_owned());
         let m = vars_to_map(&env);
-        assert_eq!(m.get("ANTHROPIC_BASE_URL"), Some(&"https://api.deepseek.com/anthropic"));
+        assert_eq!(
+            m.get("ANTHROPIC_BASE_URL"),
+            Some(&"https://api.deepseek.com/anthropic")
+        );
         assert_eq!(m.get("ANTHROPIC_AUTH_TOKEN"), Some(&"sk-test"));
         assert_eq!(m.get("ANTHROPIC_MODEL"), Some(&"deepseek-v4-pro"));
-        assert_eq!(m.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some(&"deepseek-v4-flash"));
-        assert_eq!(m.get("CLAUDE_CODE_SUBAGENT_MODEL"), Some(&"deepseek-v4-flash"));
+        assert_eq!(
+            m.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some(&"deepseek-v4-flash")
+        );
+        assert_eq!(
+            m.get("CLAUDE_CODE_SUBAGENT_MODEL"),
+            Some(&"deepseek-v4-flash")
+        );
         assert_eq!(m.get("CLAUDE_CODE_EFFORT_LEVEL"), Some(&"max"));
     }
 
@@ -358,10 +371,16 @@ mod tests {
         };
         let env = ProviderEnv::build(spec, &over, "sk-test".to_owned());
         let m = vars_to_map(&env);
-        assert_eq!(m.get("ANTHROPIC_BASE_URL"), Some(&"https://my.proxy/anthropic"));
+        assert_eq!(
+            m.get("ANTHROPIC_BASE_URL"),
+            Some(&"https://my.proxy/anthropic")
+        );
         assert_eq!(m.get("ANTHROPIC_MODEL"), Some(&"custom-model"));
         // Non-overridden field still uses spec default.
-        assert_eq!(m.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some(&"deepseek-v4-flash"));
+        assert_eq!(
+            m.get("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some(&"deepseek-v4-flash")
+        );
     }
 
     #[test]
@@ -394,7 +413,10 @@ mod tests {
         };
         let env = ProviderEnv::build(spec, &over, "sk-custom".to_owned());
         let m = vars_to_map(&env);
-        assert_eq!(m.get("ANTHROPIC_BASE_URL"), Some(&"https://example.com/api"));
+        assert_eq!(
+            m.get("ANTHROPIC_BASE_URL"),
+            Some(&"https://example.com/api")
+        );
     }
 
     #[test]

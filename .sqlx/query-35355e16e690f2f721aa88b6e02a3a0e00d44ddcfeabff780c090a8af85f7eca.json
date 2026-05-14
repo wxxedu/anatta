@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO conversations (\n                name, profile_id, backend_session_id, cwd, last_used_at\n            )\n            VALUES (?, ?, NULL, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "35355e16e690f2f721aa88b6e02a3a0e00d44ddcfeabff780c090a8af85f7eca"
+}

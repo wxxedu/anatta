@@ -13,8 +13,8 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use crate::claude::sanitize::{strip_reasoning, SanitizeError};
-use crate::profile::{min_policy_for, Family, SegmentRenderPolicy};
+use crate::claude::sanitize::{SanitizeError, strip_reasoning};
+use crate::profile::{Family, SegmentRenderPolicy, min_policy_for};
 
 use super::sidecar::copy_dir_recursive;
 
@@ -203,7 +203,10 @@ mod tests {
         // Now ask render to produce empty output (no prior segments).
         let err = render_into_working(&[], Family::ANative, &working, &sidecar, true).unwrap_err();
         match err {
-            RenderError::WouldEmptyOverwrite { path, existing_bytes } => {
+            RenderError::WouldEmptyOverwrite {
+                path,
+                existing_bytes,
+            } => {
                 assert_eq!(path, working);
                 assert_eq!(existing_bytes, prev_bytes);
             }
@@ -212,7 +215,9 @@ mod tests {
         // Original file untouched.
         assert_eq!(fs::metadata(&working).unwrap().len(), prev_bytes);
         assert!(
-            fs::read_to_string(&working).unwrap().contains("legacy turn 1"),
+            fs::read_to_string(&working)
+                .unwrap()
+                .contains("legacy turn 1"),
             "original content preserved",
         );
     }
@@ -357,7 +362,10 @@ mod tests {
         render_into_working(&prior, Family::ACompat, &working, &sidecar, true).unwrap();
 
         let body = fs::read_to_string(&working).unwrap();
-        assert!(body.contains("REAL_SIG"), "signature preserved on strict→lax");
+        assert!(
+            body.contains("REAL_SIG"),
+            "signature preserved on strict→lax"
+        );
         assert!(body.contains("\"a1\""), "thinking event kept verbatim");
     }
 
@@ -366,15 +374,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let working = tmp.path().join("working.jsonl");
         let sidecar = tmp.path().join("sidecar");
-        let outcome = render_into_working(
-            &[],
-            Family::ANative,
-            &working,
-            &sidecar,
-            true,
-        )
-        .unwrap();
-        assert!(matches!(outcome, RenderOutcome::Rendered { working_bytes: 0 }));
+        let outcome = render_into_working(&[], Family::ANative, &working, &sidecar, true).unwrap();
+        assert!(matches!(
+            outcome,
+            RenderOutcome::Rendered { working_bytes: 0 }
+        ));
         assert!(working.exists());
         assert_eq!(fs::metadata(&working).unwrap().len(), 0);
     }
@@ -392,8 +396,12 @@ mod tests {
             central_sidecar_dir: tmp.path().join("does-not-exist-sidecar"),
         }];
 
-        let outcome = render_into_working(&prior, Family::ANative, &working, &sidecar, true).unwrap();
-        assert!(matches!(outcome, RenderOutcome::Rendered { working_bytes: 0 }));
+        let outcome =
+            render_into_working(&prior, Family::ANative, &working, &sidecar, true).unwrap();
+        assert!(matches!(
+            outcome,
+            RenderOutcome::Rendered { working_bytes: 0 }
+        ));
     }
 
     #[test]

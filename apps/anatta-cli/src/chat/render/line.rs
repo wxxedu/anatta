@@ -20,7 +20,7 @@ use serde_json::Value;
 use termimad::MadSkin;
 use unicode_width::UnicodeWidthStr;
 
-use super::{markdown, EventRenderer, PALETTE};
+use super::{EventRenderer, PALETTE, markdown};
 
 const DEFAULT_WIDTH: u16 = 100;
 
@@ -96,7 +96,11 @@ impl LineRenderer {
         }
         let ids: Vec<String> = self.pending_tool_ids.drain().collect();
         for id in ids {
-            let short = if id.len() > 12 { &id[..12] } else { id.as_str() };
+            let short = if id.len() > 12 {
+                &id[..12]
+            } else {
+                id.as_str()
+            };
             let line = format!("⚙ <unfinalized tool, id={short}…>");
             let painted = if self.is_tty {
                 format!("{}\n", color(PALETTE.tool, &line))
@@ -224,10 +228,19 @@ impl LineRenderer {
         }
     }
 
-    fn render_tool_result(&self, success: bool, text: Option<&str>, structured: Option<&Value>) -> String {
+    fn render_tool_result(
+        &self,
+        success: bool,
+        text: Option<&str>,
+        structured: Option<&Value>,
+    ) -> String {
         let summary = result_summary(text, structured);
         let glyph = if success { "✓" } else { "✗" };
-        let color_c = if success { PALETTE.tool_ok } else { PALETTE.tool_err };
+        let color_c = if success {
+            PALETTE.tool_ok
+        } else {
+            PALETTE.tool_err
+        };
         let main = format!("  {glyph} {summary}");
         let mut s = if self.is_tty {
             format!("{}\n", color(color_c, &main))
@@ -505,12 +518,7 @@ impl EventRenderer for LineRenderer {
                 ..
             } => {
                 self.commit_delta();
-                self.on_rate_limit_event(
-                    limit_kind,
-                    *used_percent,
-                    status.clone(),
-                    *resets_at,
-                );
+                self.on_rate_limit_event(limit_kind, *used_percent, status.clone(), *resets_at);
             }
 
             AgentEventPayload::Error { message, fatal } => {
