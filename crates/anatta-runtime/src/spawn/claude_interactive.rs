@@ -194,10 +194,28 @@ pub struct ClaudeInteractiveSession {
 /// [`ClaudeInteractiveSession::interrupt_handle`].
 #[derive(Clone)]
 pub struct ClaudeInteractiveInterruptHandle {
-    #[allow(dead_code)] // used in Task 7 (interrupt)
     pub(crate) pty_tx: mpsc::Sender<PtyCommand>,
-    #[allow(dead_code)] // used in Task 7 (interrupt)
     pub(crate) active_turn: Arc<Mutex<Option<ActiveTurn>>>,
+}
+
+impl ClaudeInteractiveInterruptHandle {
+    /// Cancel the currently-active turn by sending Ctrl-C through the
+    /// PTY. Idempotent — no-op if no turn is active or the session is
+    /// closed. claude's TUI handles `\x03` as "interrupt current turn";
+    /// the JSONL emits a `turn_duration` shortly after, which the tail
+    /// task turns into `TurnCompleted` and the channel closes naturally.
+    pub async fn interrupt(&self) -> Result<(), SpawnError> {
+        {
+            let active = self.active_turn.lock().await;
+            if active.is_none() {
+                return Ok(());
+            }
+        }
+        self.pty_tx
+            .send(PtyCommand::Write(vec![0x03]))
+            .await
+            .map_err(|_| SpawnError::Io(std::io::Error::other("pty writer task gone")))
+    }
 }
 
 impl ClaudeInteractiveSession {

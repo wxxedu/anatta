@@ -196,11 +196,47 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
         "expected reply containing 'OK': {all_text:?}"
     );
 
-    let exit = session.close().await.expect("close");
-    eprintln!(
-        "interactive exit code={:?} duration={:?} events={}",
-        exit.exit_code, exit.duration, exit.events_emitted
-    );
+    // TODO: Task 8 will add session.close()
+    // let exit = session.close().await.expect("close");
+    // eprintln!(
+    //     "interactive exit code={:?} duration={:?} events={}",
+    //     exit.exit_code, exit.duration, exit.events_emitted
+    // );
+}
+
+#[tokio::test]
+#[ignore = "real claude API call; requires logged-in ~/.claude"]
+async fn interactive_cancel_closes_turn_channel() {
+    use anatta_runtime::spawn::{ClaudeInteractiveLaunch, ClaudeInteractiveSession};
+    use std::time::Duration;
+
+    let bin = locate_binary("claude").expect("claude binary not on PATH");
+    let claude_dir = home().join(".claude");
+    let profile = ClaudeProfile { id: ClaudeProfileId::new(), path: claude_dir };
+    let cwd = std::fs::canonicalize(tempfile::tempdir().unwrap().path()).unwrap();
+
+    let session = ClaudeInteractiveSession::open(ClaudeInteractiveLaunch {
+        profile, cwd, resume: None, binary_path: bin, provider: None, model: None, bare: true,
+    })
+    .await
+    .expect("open");
+
+    let mut turn = session
+        .send_turn("Count slowly from 1 to 100, one number per line, with a thoughtful sentence after each")
+        .await
+        .expect("send_turn");
+
+    // Let some assistant output start, then cancel.
+    let _ = tokio::time::timeout(Duration::from_secs(3), turn.events().recv()).await;
+    session.interrupt_handle().interrupt().await.expect("interrupt");
+
+    // Channel must close within a reasonable grace.
+    let drain = async {
+        while turn.events().recv().await.is_some() {}
+    };
+    tokio::time::timeout(Duration::from_secs(10), drain)
+        .await
+        .expect("turn channel did not close within 10s after interrupt");
 }
 
 #[tokio::test]
