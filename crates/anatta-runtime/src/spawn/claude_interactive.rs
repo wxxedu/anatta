@@ -4,10 +4,6 @@
 //! TUI bytes are discarded. The real data path is the session JSONL at
 //! `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/<session-uuid>.jsonl`,
 //! which we tail with [`HistoryProjector`](crate::claude::HistoryProjector).
-//!
-//! Mirrors the long-lived shape of
-//! [`PersistentCodexSession`](crate::spawn::PersistentCodexSession): one
-//! `open()`, many `send_turn()` calls, one `close()`.
 
 /// Wrap `prompt` in xterm bracketed-paste escape sequences and terminate
 /// with a CR (which claude's input handler interprets as "submit").
