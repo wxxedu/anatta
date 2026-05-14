@@ -18,14 +18,18 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::claude::history::ClaudeEvent;
 use crate::claude::HistoryProjector;
-use crate::conversation::paths::{wait_for_jsonl, working_jsonl_path};
+use crate::conversation::paths::working_jsonl_path;
 use crate::profile::ClaudeProfile;
 use crate::spawn::stderr_buf;
 use crate::spawn::{ClaudeSessionId, ExitInfo, SpawnError};
 
 const PTY_ROWS: u16 = 50;
 const PTY_COLS: u16 = 200;
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+/// After spawn, sleep this long before returning from `open()` so the
+/// PTY input handler has time to be ready for bracketed-paste keystrokes
+/// from the first `send_turn`. Empirically ~200 ms is enough for claude
+/// 2.1.x on macOS; 500 ms is a defensive default.
+const STARTUP_SLEEP: Duration = Duration::from_millis(500);
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
 // ──────────────────────────────────────────────────────────────────────
@@ -321,22 +325,17 @@ impl ClaudeInteractiveSession {
             })
             .map_err(SpawnError::Io)?;
 
-        // Wait for the JSONL file to appear — its presence means
-        // claude is past startup and the input handler is alive.
         let cwd_str = launch
             .cwd
             .to_str()
             .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
         let jsonl = working_jsonl_path(&launch.profile.path, cwd_str, session_id.as_str());
-        if let Err(e) = wait_for_jsonl(&jsonl, STARTUP_TIMEOUT).await {
-            let _ = child.kill(); // best-effort cleanup; child may already be gone
-            return Err(SpawnError::Io(std::io::Error::other(format!(
-                "claude did not write its session JSONL at {} within {:?}: {}",
-                jsonl.display(),
-                STARTUP_TIMEOUT,
-                e,
-            ))));
-        }
+
+        // Give claude's PTY input handler a moment to be ready for our first
+        // bracketed-paste prompt. Claude defers writing the session JSONL until
+        // the first user message, so we cannot use file presence as a readiness
+        // signal — the tail task handles "file doesn't exist yet" via retry.
+        tokio::time::sleep(STARTUP_SLEEP).await;
 
         let active_turn: Arc<Mutex<Option<ActiveTurn>>> = Arc::new(Mutex::new(None));
         let events_emitted = Arc::new(AtomicU64::new(0));
