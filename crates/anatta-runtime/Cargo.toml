@@ -27,6 +27,8 @@ installer = [
 spawn = [
     "dep:tokio",
     "dep:async-trait",
+    "dep:portable-pty",
+    "dep:uuid",
 ]
 
 [dependencies]
@@ -48,6 +50,8 @@ flate2       = { version = "1",    optional = true }
 tar          = { version = "0.4",  optional = true }
 tokio        = { version = "1",    default-features = false, features = ["fs", "rt", "macros", "io-util", "sync", "process", "time"], optional = true }
 futures-util = { version = "0.3",  default-features = false, features = ["std"], optional = true }
+portable-pty = { version = "0.9", optional = true }
+uuid         = { version = "1",   features = ["v4"], optional = true }
 
 [dev-dependencies]
 anatta-core = { path = "../anatta-core" }

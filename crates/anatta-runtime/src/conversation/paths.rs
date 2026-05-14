@@ -12,12 +12,17 @@
 use std::path::{Path, PathBuf};
 
 /// Encode a canonical absolute path into claude's filesystem-key form:
-/// every `/` is replaced with `-`. The caller is responsible for ensuring
-/// the path has been canonicalized (via `std::fs::canonicalize`) at
-/// conversation-create time. Re-canonicalizing here would fail if the
-/// directory has since been removed.
+/// every `/` AND every `.` is replaced with `-`. Empirically, claude
+/// encodes both characters this way when computing
+/// `<CLAUDE_CONFIG_DIR>/projects/<encoded-cwd>/`. Caller is responsible
+/// for ensuring the path has been canonicalized (via `std::fs::canonicalize`)
+/// at conversation-create time — re-canonicalizing here would fail if
+/// the directory has since been removed.
 pub fn encode_cwd(canonical_cwd: &str) -> String {
-    canonical_cwd.replace('/', "-")
+    canonical_cwd
+        .chars()
+        .map(|c| if c == '/' || c == '.' { '-' } else { c })
+        .collect()
 }
 
 /// Working JSONL path: `<profile_dir>/projects/<encoded_cwd>/<session_uuid>.jsonl`.
@@ -60,6 +65,19 @@ mod tests {
         assert_eq!(
             encode_cwd("/private/tmp/anatta-compact-test"),
             "-private-tmp-anatta-compact-test",
+        );
+    }
+
+    #[test]
+    fn encode_cwd_replaces_dots_too() {
+        // Empirically observed: claude encodes both '/' and '.' as '-'.
+        assert_eq!(
+            encode_cwd("/private/var/folders/T/.tmpfoo"),
+            "-private-var-folders-T--tmpfoo",
+        );
+        assert_eq!(
+            encode_cwd("/Users/me/repo/.claude/worktrees/wt"),
+            "-Users-me-repo--claude-worktrees-wt",
         );
     }
 

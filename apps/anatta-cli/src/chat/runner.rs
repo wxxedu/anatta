@@ -36,6 +36,7 @@ pub(crate) async fn run_new(
     name: String,
     profile_id: String,
     cwd: Option<PathBuf>,
+    per_turn: bool,
     cfg: &Config,
 ) -> Result<(), ChatError> {
     let profile = cfg
@@ -78,10 +79,14 @@ pub(crate) async fn run_new(
         .get_conversation(&name)
         .await?
         .ok_or_else(|| ChatError::NotFound(name.clone()))?;
-    drive_chat(conv, profile, cfg, /* resumed = */ false).await
+    drive_chat(conv, profile, per_turn, cfg, /* resumed = */ false).await
 }
 
-pub(crate) async fn run_resume(name: String, cfg: &Config) -> Result<(), ChatError> {
+pub(crate) async fn run_resume(
+    name: String,
+    per_turn: bool,
+    cfg: &Config,
+) -> Result<(), ChatError> {
     let conv = cfg
         .store
         .get_conversation(&name)
@@ -92,12 +97,13 @@ pub(crate) async fn run_resume(name: String, cfg: &Config) -> Result<(), ChatErr
         .get_profile(&conv.profile_id)
         .await?
         .ok_or_else(|| ChatError::ProfileNotFound(conv.profile_id.clone()))?;
-    drive_chat(conv, profile, cfg, /* resumed = */ true).await
+    drive_chat(conv, profile, per_turn, cfg, /* resumed = */ true).await
 }
 
 async fn drive_chat(
     conv: ConversationRecord,
     profile: ProfileRecord,
+    per_turn: bool,
     cfg: &Config,
     resumed: bool,
 ) -> Result<(), ChatError> {
@@ -114,7 +120,7 @@ async fn drive_chat(
     let mut renderer = LineRenderer::new();
     let mut input = InputReader::new(&cfg.anatta_home)?;
 
-    let result = run_chat(&conv, profile, cfg, &mut renderer, &mut input).await;
+    let result = run_chat(&conv, profile, per_turn, cfg, &mut renderer, &mut input).await;
 
     renderer.on_chat_end();
     input.save_history();
@@ -125,6 +131,7 @@ async fn drive_chat(
 async fn run_chat(
     conv: &ConversationRecord,
     profile: ProfileRecord,
+    per_turn: bool,
     cfg: &Config,
     renderer: &mut LineRenderer,
     input: &mut InputReader,
@@ -161,7 +168,13 @@ async fn run_chat(
         active_seg = s;
     }
 
-    let launch = launch::build_launch(&profile, cwd.clone(), conv.backend_session_id.clone(), cfg)?;
+    let launch = launch::build_launch(
+        &profile,
+        cwd.clone(),
+        conv.backend_session_id.clone(),
+        per_turn,
+        cfg,
+    )?;
     let mut session = Session::open(launch).await?;
 
     // Persist the engine session id on first turn (claude needs the
@@ -284,6 +297,7 @@ async fn run_chat(
                             &new_profile,
                             cwd.clone(),
                             resume_id.clone(),
+                            per_turn,
                             cfg,
                         ) {
                             Ok(l) => l,
