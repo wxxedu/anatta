@@ -6,15 +6,26 @@
 //! which we tail with [`HistoryProjector`](crate::claude::HistoryProjector).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use anatta_core::{AgentEvent, AgentEventPayload, ProjectionContext, Projector};
+use anatta_core::{AgentEvent, AgentEventEnvelope, AgentEventPayload, Backend, ProjectionContext, Projector};
 use chrono::Utc;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::claude::history::ClaudeEvent;
 use crate::claude::HistoryProjector;
+use crate::conversation::paths::{wait_for_jsonl, working_jsonl_path};
+use crate::profile::ClaudeProfile;
+use crate::spawn::stderr_buf;
+use crate::spawn::{ClaudeSessionId, SpawnError};
+
+const PTY_ROWS: u16 = 50;
+const PTY_COLS: u16 = 200;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ──────────────────────────────────────────────────────────────────────
 // Prompt encoding
@@ -119,4 +130,357 @@ pub async fn run_tail_for_test(
     session_id: String,
 ) {
     run_tail(path, events_tx, session_id).await
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Public configuration
+// ──────────────────────────────────────────────────────────────────────
+
+/// Configuration for spawning an interactive (PTY-wrapped) claude session.
+#[derive(Debug, Clone)]
+pub struct ClaudeInteractiveLaunch {
+    pub profile: ClaudeProfile,
+    /// MUST be canonicalized (e.g. `/tmp` → `/private/tmp` on macOS)
+    /// because we derive the JSONL path from it via `working_jsonl_path`
+    /// and claude does the same canonicalization internally.
+    pub cwd: PathBuf,
+    /// `Some(id)` → `--resume <id>`. `None` → fresh session; a new UUID
+    /// will be chosen at `open()` and passed via `--session-id`.
+    pub resume: Option<ClaudeSessionId>,
+    pub binary_path: PathBuf,
+    pub provider: Option<crate::profile::ProviderEnv>,
+    /// Optional model override (passed as `--model <name>`).
+    pub model: Option<String>,
+    /// If true, pass `--bare` for a minimal child environment
+    /// (no hooks / LSP / plugin sync / CLAUDE.md auto-discovery /
+    /// keychain reads). Defaults to true — anatta owns the environment.
+    pub bare: bool,
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Internal types
+// ──────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)] // variants used in Task 6 (send_turn) and Task 7 (interrupt)
+pub(crate) enum PtyCommand {
+    Write(Vec<u8>),
+    Shutdown,
+}
+
+pub(crate) struct ActiveTurn {
+    events_tx: mpsc::Sender<AgentEvent>,
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Session
+// ──────────────────────────────────────────────────────────────────────
+
+/// Long-lived interactive `claude` connection.
+pub struct ClaudeInteractiveSession {
+    #[allow(dead_code)] // used in Task 8 (close/wait)
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    #[allow(dead_code)] // held so resize(...) can be added later
+    master: Box<dyn MasterPty + Send>,
+    session_id: ClaudeSessionId,
+    pty_tx: mpsc::Sender<PtyCommand>,
+    active_turn: Arc<Mutex<Option<ActiveTurn>>>,
+    #[allow(dead_code)] // kept for ExitInfo shape (Task 8)
+    stderr: stderr_buf::Handle,
+    #[allow(dead_code)] // kept for ExitInfo shape (Task 8)
+    started_at: Instant,
+    #[allow(dead_code)] // used in Task 8 (ExitInfo)
+    events_emitted: Arc<AtomicU64>,
+}
+
+/// Cloneable handle for interrupting the active turn from outside — see
+/// [`ClaudeInteractiveSession::interrupt_handle`].
+#[derive(Clone)]
+pub struct ClaudeInteractiveInterruptHandle {
+    #[allow(dead_code)] // used in Task 7 (interrupt)
+    pub(crate) pty_tx: mpsc::Sender<PtyCommand>,
+    #[allow(dead_code)] // used in Task 7 (interrupt)
+    pub(crate) active_turn: Arc<Mutex<Option<ActiveTurn>>>,
+}
+
+impl ClaudeInteractiveSession {
+    pub async fn open(launch: ClaudeInteractiveLaunch) -> Result<Self, SpawnError> {
+        if !launch.binary_path.exists() {
+            return Err(SpawnError::BinaryNotFound(launch.binary_path.clone()));
+        }
+        if !launch.profile.path.is_dir() {
+            return Err(SpawnError::ProfilePathInvalid(launch.profile.path.clone()));
+        }
+
+        // Pick session id up front so we know the JSONL path without
+        // having to discover the filename later.
+        let session_id = launch
+            .resume
+            .clone()
+            .unwrap_or_else(|| ClaudeSessionId::new(uuid::Uuid::new_v4().to_string()));
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: PTY_ROWS,
+                cols: PTY_COLS,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| SpawnError::Io(std::io::Error::other(format!("openpty: {e}"))))?;
+
+        let mut cmd = CommandBuilder::new(&launch.binary_path);
+        cmd.env(
+            "CLAUDE_CONFIG_DIR",
+            launch.profile.path.to_string_lossy().as_ref(),
+        );
+        cmd.env(
+            "TERM",
+            std::env::var("TERM").as_deref().unwrap_or("xterm-256color"),
+        );
+        if let Some(env) = &launch.provider {
+            for (k, v) in &env.vars {
+                cmd.env(k, v);
+            }
+        }
+        cmd.cwd(launch.cwd.as_os_str());
+        cmd.arg("--session-id");
+        cmd.arg(session_id.as_str());
+        cmd.arg("--permission-mode");
+        cmd.arg("bypassPermissions");
+        if launch.bare {
+            cmd.arg("--bare");
+        }
+        if let Some(m) = &launch.model {
+            cmd.arg("--model");
+            cmd.arg(m);
+        }
+        if launch.resume.is_some() {
+            cmd.arg("--resume");
+            cmd.arg(session_id.as_str());
+        }
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| SpawnError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
+        drop(pair.slave);
+
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| SpawnError::Io(std::io::Error::other(format!("clone_reader: {e}"))))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| SpawnError::Io(std::io::Error::other(format!("take_writer: {e}"))))?;
+
+        // Drain thread: must read continuously or the kernel PTY buffer
+        // fills, claude blocks on its next write, and the JSONL stops
+        // being appended.
+        std::thread::Builder::new()
+            .name("claude-pty-drain".into())
+            .spawn(move || {
+                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+            })
+            .map_err(SpawnError::Io)?;
+
+        // Writer thread: owns the sync `Write`, pulls commands off a
+        // tokio mpsc. Dedicated OS thread because portable-pty's writer
+        // is blocking.
+        let (pty_tx, mut pty_rx) = mpsc::channel::<PtyCommand>(8);
+        std::thread::Builder::new()
+            .name("claude-pty-writer".into())
+            .spawn(move || {
+                let mut writer = writer;
+                while let Some(cmd) = pty_rx.blocking_recv() {
+                    match cmd {
+                        PtyCommand::Write(bytes) => {
+                            if std::io::Write::write_all(&mut writer, &bytes).is_err() {
+                                break;
+                            }
+                            let _ = std::io::Write::flush(&mut writer);
+                        }
+                        PtyCommand::Shutdown => break,
+                    }
+                }
+                // Dropping `writer` closes the master end of the PTY,
+                // which sends EOF / SIGHUP to the child.
+            })
+            .map_err(SpawnError::Io)?;
+
+        // Wait for the JSONL file to appear — its presence means
+        // claude is past startup and the input handler is alive.
+        let cwd_str = launch
+            .cwd
+            .to_str()
+            .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
+        let jsonl = working_jsonl_path(&launch.profile.path, cwd_str, session_id.as_str());
+        wait_for_jsonl(&jsonl, STARTUP_TIMEOUT)
+            .await
+            .map_err(|e| SpawnError::Io(std::io::Error::other(format!(
+                "claude did not write its session JSONL at {} within {:?}: {}",
+                jsonl.display(),
+                STARTUP_TIMEOUT,
+                e,
+            ))))?;
+
+        let active_turn: Arc<Mutex<Option<ActiveTurn>>> = Arc::new(Mutex::new(None));
+        let events_emitted = Arc::new(AtomicU64::new(0));
+        let stderr_handle = stderr_buf::Handle::new();
+
+        // Tail task: dispatches projected events to the currently-
+        // active turn (if any).
+        let active_for_tail = active_turn.clone();
+        let counter_for_tail = events_emitted.clone();
+        let session_id_for_tail = session_id.as_str().to_owned();
+        tokio::spawn(async move {
+            persistent_tail_loop(
+                jsonl,
+                active_for_tail,
+                counter_for_tail,
+                session_id_for_tail,
+            )
+            .await;
+        });
+
+        Ok(Self {
+            child,
+            master: pair.master,
+            session_id,
+            pty_tx,
+            active_turn,
+            stderr: stderr_handle,
+            started_at: Instant::now(),
+            events_emitted,
+        })
+    }
+
+    pub fn session_id(&self) -> &str {
+        self.session_id.as_str()
+    }
+
+    pub async fn is_idle(&self) -> bool {
+        self.active_turn.lock().await.is_none()
+    }
+
+    pub fn interrupt_handle(&self) -> ClaudeInteractiveInterruptHandle {
+        ClaudeInteractiveInterruptHandle {
+            pty_tx: self.pty_tx.clone(),
+            active_turn: self.active_turn.clone(),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Persistent tail
+// ──────────────────────────────────────────────────────────────────────
+
+/// Like `run_tail`, but routes events to the currently-active turn (if
+/// any) instead of a single fixed channel. Closes the active turn on
+/// `AgentEventPayload::TurnCompleted`.
+async fn persistent_tail_loop(
+    path: PathBuf,
+    active: Arc<Mutex<Option<ActiveTurn>>>,
+    counter: Arc<AtomicU64>,
+    session_id: String,
+) {
+    let mut projector = HistoryProjector::new();
+    let mut byte_offset: u64 = 0;
+    let mut line_buf = String::new();
+    let interval = Duration::from_millis(25);
+
+    loop {
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(f) => f,
+            Err(_) => {
+                tokio::time::sleep(interval).await;
+                continue;
+            }
+        };
+        let mut reader = BufReader::new(file);
+        if reader.seek(std::io::SeekFrom::Start(byte_offset)).await.is_err() {
+            tokio::time::sleep(interval).await;
+            continue;
+        }
+
+        loop {
+            line_buf.clear();
+            match reader.read_line(&mut line_buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    if !line_buf.ends_with('\n') {
+                        break;
+                    }
+                    byte_offset += n as u64;
+                    let trimmed = line_buf.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let raw: ClaudeEvent = match serde_json::from_str(trimmed) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    };
+                    let ctx = ProjectionContext {
+                        session_id: session_id.clone(),
+                        received_at: Utc::now(),
+                    };
+                    let evs = projector.project(&raw, &ctx);
+
+                    let mut at = active.lock().await;
+                    let Some(turn) = at.as_mut() else {
+                        // No active turn — nothing to dispatch to. We
+                        // still advanced `byte_offset` so we don't
+                        // re-read these lines next tick.
+                        continue;
+                    };
+                    let mut completed = false;
+                    for ev in evs {
+                        completed |= matches!(ev.payload, AgentEventPayload::TurnCompleted { .. });
+                        if turn.events_tx.send(ev).await.is_err() {
+                            *at = None;
+                            break;
+                        }
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if completed {
+                        *at = None;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+async fn push_synthetic_session_started(
+    events_tx: &mpsc::Sender<AgentEvent>,
+    counter: &AtomicU64,
+    session_id: &str,
+    cwd_str: &str,
+) -> Result<(), SpawnError> {
+    let ev = AgentEvent {
+        envelope: AgentEventEnvelope {
+            session_id: session_id.to_owned(),
+            timestamp: Utc::now(),
+            backend: Backend::Claude,
+            raw_uuid: None,
+            parent_tool_use_id: None,
+        },
+        payload: AgentEventPayload::SessionStarted {
+            cwd: cwd_str.to_owned(),
+            model: String::new(),
+            tools_available: Vec::new(),
+        },
+    };
+    events_tx
+        .send(ev)
+        .await
+        .map_err(|_| SpawnError::Io(std::io::Error::other("consumer channel closed")))?;
+    counter.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }

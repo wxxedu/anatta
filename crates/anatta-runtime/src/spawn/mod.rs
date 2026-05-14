@@ -31,7 +31,10 @@ mod session;
 mod stderr_buf;
 
 pub use claude::ClaudeLaunch;
-pub use claude_interactive::{encode_prompt_for_test, run_tail_for_test};
+pub use claude_interactive::{
+    encode_prompt_for_test, run_tail_for_test, ClaudeInteractiveInterruptHandle,
+    ClaudeInteractiveLaunch, ClaudeInteractiveSession,
+};
 pub use codex::{CodexInterruptHandle, CodexLaunch, PersistentCodexSession, TurnHandle};
 pub use ids::{ClaudeSessionId, CodexThreadId};
 pub use session::{
