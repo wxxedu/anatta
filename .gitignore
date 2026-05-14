@@ -44,3 +44,13 @@ Thumbs.db
 # ── anatta local dev state (when ANATTA_HOME points inside the repo) ─────
 /.anatta/
 /.anatta-*/
+
+# ── Claude Code session state ────────────────────────────────────────────
+# Worktrees that EnterWorktree creates land here; they're per-session,
+# not source-controlled.
+.claude/
+
+# ── Stray sqlx offline cache at repo root ────────────────────────────────
+# The real one lives at crates/anatta-store/.sqlx/; running `cargo sqlx
+# prepare` from the repo root accidentally dumps a second copy here.
+/.sqlx/
