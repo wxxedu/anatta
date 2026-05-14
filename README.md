@@ -1,2 +1,1 @@
-# anatta
-Anatta Is All You Need
+# Anatta is All You Need

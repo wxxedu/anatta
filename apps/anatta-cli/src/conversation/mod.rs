@@ -414,31 +414,39 @@ pub async fn render_for_session(
 }
 
 /// Persist an engine-generated session/thread id onto the active
-/// segment. Idempotent — only sets when currently NULL on the segment.
+/// segment. Sets the id when:
+///   - the segment has none yet (first-turn case for fresh
+///     conversations), OR
+///   - the segment has a minted id but no absorbed content
+///     (cross-engine swap into a still-empty segment: render couldn't
+///     pre-populate a working file because all prior segments were
+///     empty, the launch went `--resume`-less to let the engine mint
+///     a real id, and now we replace the placeholder).
 ///
-/// During tier 3 transition (while `conversations.session_uuid` still
-/// exists in the schema), this ALSO dual-writes to that legacy column
-/// for backward compat with code paths that haven't been ported yet.
-/// Once `enable_destructive_drop` retires the legacy column, the
-/// dual-write becomes a single write — the call to `set_session_uuid`
-/// will fail at SQL level if the column is gone, but by then no
-/// caller should be reading from it.
+/// During the tier-3 transition window, this ALSO best-effort writes
+/// to the legacy `conversations.backend_session_id` column for
+/// `send --resume` reverse-lookup compatibility. The legacy
+/// `session_uuid` column was dropped by tier-3 destructive migration.
 pub async fn set_active_segment_engine_id_if_needed(
     cfg: &Config,
     conv_name: &str,
     active_segment: &SegmentRecord,
     engine_session_id: &str,
 ) -> Result<(), OrchError> {
-    if active_segment.engine_session_id.is_some() {
+    let needs_update = match active_segment.engine_session_id.as_deref() {
+        None => true,
+        Some(existing) if existing == engine_session_id => false,
+        Some(_) => active_segment.last_absorbed_bytes == 0,
+    };
+    if !needs_update {
         return Ok(());
     }
     cfg.store
         .set_engine_session_id(&active_segment.id, engine_session_id)
         .await?;
-    // Best-effort dual-write to the legacy column. If the column has
-    // been dropped (post tier 3 destructive migration), the SQL fails;
-    // we swallow it because the segment-side write is the new source
-    // of truth.
+    // Best-effort dual-write to legacy `backend_session_id` so the
+    // `send --resume` reverse-lookup helper still resolves. Errors are
+    // intentionally swallowed.
     let _ = cfg
         .store
         .set_session_uuid(conv_name, engine_session_id)
