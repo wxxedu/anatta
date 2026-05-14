@@ -64,6 +64,12 @@ impl AppServerProjector {
     }
 
     /// Dispatch one notification. Returns the AgentEvents to forward.
+    ///
+    /// The drop-arm at the bottom lists known notifications we
+    /// intentionally ignore alongside the `_` catch-all. The listed
+    /// patterns are documentation-via-code, hence
+    /// `wildcard_in_or_patterns` is silenced for this method.
+    #[allow(clippy::wildcard_in_or_patterns)]
     pub(crate) fn project(&mut self, method: &str, params: &Value) -> Vec<AgentEvent> {
         let now = Utc::now();
         match method {
@@ -172,11 +178,7 @@ impl AppServerProjector {
         )]
     }
 
-    fn project_reasoning_delta(
-        &mut self,
-        params: &Value,
-        now: DateTime<Utc>,
-    ) -> Vec<AgentEvent> {
+    fn project_reasoning_delta(&mut self, params: &Value, now: DateTime<Utc>) -> Vec<AgentEvent> {
         let Some(p) = parse::<ReasoningTextDelta>(params) else {
             return Vec::new();
         };
@@ -277,11 +279,7 @@ impl AppServerProjector {
         }
     }
 
-    fn project_item_completed(
-        &mut self,
-        params: &Value,
-        now: DateTime<Utc>,
-    ) -> Vec<AgentEvent> {
+    fn project_item_completed(&mut self, params: &Value, now: DateTime<Utc>) -> Vec<AgentEvent> {
         let item = match params.get("item") {
             Some(i) => i,
             None => return Vec::new(),
@@ -434,11 +432,7 @@ impl AppServerProjector {
         )]
     }
 
-    fn project_turn_completed(
-        &mut self,
-        params: &Value,
-        now: DateTime<Utc>,
-    ) -> Vec<AgentEvent> {
+    fn project_turn_completed(&mut self, params: &Value, now: DateTime<Utc>) -> Vec<AgentEvent> {
         let status = params
             .get("turn")
             .and_then(|t| t.get("status"))
@@ -547,8 +541,7 @@ mod tests {
         match (&a[0], &b[0]) {
             (
                 AgentEventPayload::AssistantTextDelta {
-                    text_so_far: first,
-                    ..
+                    text_so_far: first, ..
                 },
                 AgentEventPayload::AssistantTextDelta {
                     text_so_far: second,
@@ -734,7 +727,11 @@ mod tests {
             _ => panic!("expected primary RateLimit"),
         }
         match &evts[1] {
-            AgentEventPayload::RateLimit { limit_kind, used_percent, .. } => {
+            AgentEventPayload::RateLimit {
+                limit_kind,
+                used_percent,
+                ..
+            } => {
                 assert_eq!(limit_kind, "secondary");
                 assert!((used_percent.unwrap() - 20.0).abs() < 1e-9);
             }
@@ -784,11 +781,7 @@ mod tests {
     #[test]
     fn warning_notification_maps_to_nonfatal_error_event() {
         let mut p = AppServerProjector::new("t1".into());
-        let evts = run(
-            &mut p,
-            "warning",
-            json!({"message":"slow network"}),
-        );
+        let evts = run(&mut p, "warning", json!({"message":"slow network"}));
         match &evts[0] {
             AgentEventPayload::Error { message, fatal } => {
                 assert_eq!(message, "slow network");

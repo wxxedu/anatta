@@ -73,7 +73,8 @@ pub async fn enable_destructive_drop(pool: &SqlitePool) -> Result<(), StoreError
         // No anatta_migration_state table yet (pre-0007 DB). Caller
         // should re-run after open() to pick up the table.
         return Err(StoreError::MigrationBlocked(
-            "anatta_migration_state table missing; run Store::open() first to apply 0007a".to_owned(),
+            "anatta_migration_state table missing; run Store::open() first to apply 0007a"
+                .to_owned(),
         ));
     }
     mark_done(pool, "0007_drop_enabled").await
@@ -89,12 +90,11 @@ async fn marker_table_exists(pool: &SqlitePool) -> Result<bool, StoreError> {
 }
 
 async fn is_done(pool: &SqlitePool, key: &str) -> Result<bool, StoreError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT value FROM anatta_migration_state WHERE key = ?",
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM anatta_migration_state WHERE key = ?")
+            .bind(key)
+            .fetch_optional(pool)
+            .await?;
     Ok(row.map(|(v,)| v == "done").unwrap_or(false))
 }
 
@@ -302,7 +302,10 @@ mod tests {
 
         let err = run_tier3_post_migration(store.pool()).await.unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("seg-orphan"), "expected orphan id in error: {msg}");
+        assert!(
+            msg.contains("seg-orphan"),
+            "expected orphan id in error: {msg}"
+        );
     }
 
     #[tokio::test]

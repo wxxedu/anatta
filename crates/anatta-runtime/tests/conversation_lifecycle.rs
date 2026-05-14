@@ -20,16 +20,18 @@
 //!
 //! This is the most realistic test we can run without spending API tokens.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 
 use anatta_runtime::conversation::{
-    absorb_after_turn, render_into_working, AbsorbInput, AbsorbOutcome, PriorSegmentInput,
-    RenderOutcome,
+    AbsorbInput, AbsorbOutcome, PriorSegmentInput, RenderOutcome, absorb_after_turn,
+    render_into_working,
 };
 use anatta_runtime::conversation::{encode_cwd, working_jsonl_path, working_sidecar_dir};
-use anatta_runtime::profile::{family_of, min_policy_for, BackendKind, Family, SegmentRenderPolicy};
+use anatta_runtime::profile::{
+    BackendKind, Family, SegmentRenderPolicy, family_of, min_policy_for,
+};
 
 // ──────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -74,6 +76,7 @@ fn append_lines(path: &std::path::Path, lines: &[String]) {
 
 // Mimic the orchestration: a "segment" is a (id, profile_dir, source_family,
 // last_absorbed_bytes, render_initial_bytes, ended) row plus on-disk paths.
+#[allow(dead_code)] // `profile_dir` documents the row shape; current tests don't read it
 struct Segment {
     id: String,
     profile_dir: PathBuf,
@@ -166,7 +169,13 @@ fn full_lifecycle_first_turn_swap_back_swap_crash_recovery_finalize() {
     let (work_a, work_a_sidecar) = working_paths(&profile_a_dir, cwd_str, sess_uuid);
     let first_turn = vec![
         user_msg("u1", None, "hello", sess_uuid),
-        assistant_thinking("a1", "u1", "thinking-strict", "REAL_ANTHROPIC_SIG", sess_uuid),
+        assistant_thinking(
+            "a1",
+            "u1",
+            "thinking-strict",
+            "REAL_ANTHROPIC_SIG",
+            sess_uuid,
+        ),
         assistant_text("a2", "a1", "hi back", sess_uuid),
     ];
     append_lines(&work_a, &first_turn);
@@ -210,18 +219,29 @@ fn full_lifecycle_first_turn_swap_back_swap_crash_recovery_finalize() {
         render_initial_bytes: seg0.render_initial_bytes,
     })
     .unwrap();
-    if let AbsorbOutcome::Absorbed { new_last_absorbed, .. } = abs {
+    if let AbsorbOutcome::Absorbed {
+        new_last_absorbed, ..
+    } = abs
+    {
         seg0.last_absorbed_bytes = new_last_absorbed;
     } else {
         panic!("expected Absorbed");
     }
-    assert_eq!(line_count(&seg0.central_events()), 5, "5 events after 2nd turn");
+    assert_eq!(
+        line_count(&seg0.central_events()),
+        5,
+        "5 events after 2nd turn"
+    );
 
     // ── 5. Profile swap A → B (same-family target lax, so Verbatim). ──
     seg0.ended = true;
     let seg1_id = ulid::Ulid::new().to_string();
     let policy = min_policy_for(seg0.source_family, family_b);
-    assert_eq!(policy, SegmentRenderPolicy::Verbatim, "a-native→a-compat is Verbatim");
+    assert_eq!(
+        policy,
+        SegmentRenderPolicy::Verbatim,
+        "a-native→a-compat is Verbatim"
+    );
 
     // Render into profile B's projects, under the SAME session_uuid.
     let (work_b, work_b_sidecar) = working_paths(&profile_b_dir, cwd_str, sess_uuid);
@@ -273,7 +293,10 @@ fn full_lifecycle_first_turn_swap_back_swap_crash_recovery_finalize() {
         render_initial_bytes: seg1.render_initial_bytes,
     })
     .unwrap();
-    if let AbsorbOutcome::Absorbed { new_last_absorbed, .. } = abs {
+    if let AbsorbOutcome::Absorbed {
+        new_last_absorbed, ..
+    } = abs
+    {
         seg1.last_absorbed_bytes = new_last_absorbed;
     }
     assert_eq!(
@@ -282,7 +305,10 @@ fn full_lifecycle_first_turn_swap_back_swap_crash_recovery_finalize() {
         "seg 1's central holds ONLY the 3 new events"
     );
     let seg1_body = fs::read_to_string(seg1.central_events()).unwrap();
-    assert!(seg1_body.contains("FAKE_PROXY_SIG"), "seg 1 retains its (bogus) signature");
+    assert!(
+        seg1_body.contains("FAKE_PROXY_SIG"),
+        "seg 1 retains its (bogus) signature"
+    );
 
     // ── 7. Crash-recovery test: simulate offset DB update failure on seg 1. ──
     // Re-run absorb with the SAME old offset — should detect already-applied.
@@ -396,7 +422,10 @@ fn full_lifecycle_first_turn_swap_back_swap_crash_recovery_finalize() {
         render_initial_bytes: seg2.render_initial_bytes,
     })
     .unwrap();
-    if let AbsorbOutcome::Absorbed { new_last_absorbed, .. } = abs {
+    if let AbsorbOutcome::Absorbed {
+        new_last_absorbed, ..
+    } = abs
+    {
         seg2.last_absorbed_bytes = new_last_absorbed;
     }
     assert_eq!(
@@ -416,17 +445,44 @@ fn full_lifecycle_first_turn_swap_back_swap_crash_recovery_finalize() {
 
     // ── 11. Verify the conversation directory layout matches the spec. ──
     let conv_dir = anatta_home.join("conversations").join(&conv_id);
-    assert!(conv_dir.join("segments").join(&seg0.id).join("events.jsonl").exists());
-    assert!(conv_dir.join("segments").join(&seg1.id).join("events.jsonl").exists());
-    assert!(conv_dir.join("segments").join(&seg2.id).join("events.jsonl").exists());
+    assert!(
+        conv_dir
+            .join("segments")
+            .join(&seg0.id)
+            .join("events.jsonl")
+            .exists()
+    );
+    assert!(
+        conv_dir
+            .join("segments")
+            .join(&seg1.id)
+            .join("events.jsonl")
+            .exists()
+    );
+    assert!(
+        conv_dir
+            .join("segments")
+            .join(&seg2.id)
+            .join("events.jsonl")
+            .exists()
+    );
 
     // ── 12. Verify path encoding matches what claude expects. ──
     assert_eq!(encode_cwd("/Users/test/code"), "-Users-test-code");
 
     eprintln!("✓ full lifecycle test passed:");
-    eprintln!("  seg 0 (a-native): {} events in central", line_count(&seg0.central_events()));
-    eprintln!("  seg 1 (a-compat): {} events in central", line_count(&seg1.central_events()));
-    eprintln!("  seg 2 (a-native): {} events in central", line_count(&seg2.central_events()));
+    eprintln!(
+        "  seg 0 (a-native): {} events in central",
+        line_count(&seg0.central_events())
+    );
+    eprintln!(
+        "  seg 1 (a-compat): {} events in central",
+        line_count(&seg1.central_events())
+    );
+    eprintln!(
+        "  seg 2 (a-native): {} events in central",
+        line_count(&seg2.central_events())
+    );
 }
 
 /// Regression: a legacy conversation (one that existed before tier 1)
@@ -448,8 +504,7 @@ fn legacy_working_file_protected_from_empty_render() {
 
     // Pre-existing legacy JSONL with content at the working path.
     let (work, work_sidecar) = working_paths(&profile_dir, cwd, session);
-    let legacy_content =
-        "{\"type\":\"user\",\"uuid\":\"u1\",\"parentUuid\":null,\"sessionId\":\"deadbeef\",\"message\":{\"role\":\"user\",\"content\":\"hello from before tier 1\"}}\n";
+    let legacy_content = "{\"type\":\"user\",\"uuid\":\"u1\",\"parentUuid\":null,\"sessionId\":\"deadbeef\",\"message\":{\"role\":\"user\",\"content\":\"hello from before tier 1\"}}\n";
     append_lines(&work, &[legacy_content.trim_end().to_string()]);
     let pre_size = fs::metadata(&work).unwrap().len();
     assert!(pre_size > 0);
@@ -470,7 +525,9 @@ fn legacy_working_file_protected_from_empty_render() {
     // Working file untouched
     assert_eq!(fs::metadata(&work).unwrap().len(), pre_size);
     assert!(
-        fs::read_to_string(&work).unwrap().contains("hello from before tier 1"),
+        fs::read_to_string(&work)
+            .unwrap()
+            .contains("hello from before tier 1"),
         "legacy content preserved"
     );
 }
@@ -501,8 +558,7 @@ fn legacy_migration_then_render_preserves_content() {
     // do — copy the legacy file into central seg 0 events.jsonl.
     let conv_id = ulid::Ulid::new().to_string();
     let seg_id = ulid::Ulid::new().to_string();
-    let central_events =
-        central_dir(anatta_home, &conv_id, &seg_id).join("events.jsonl");
+    let central_events = central_dir(anatta_home, &conv_id, &seg_id).join("events.jsonl");
     fs::create_dir_all(central_events.parent().unwrap()).unwrap();
     fs::copy(&work, &central_events).unwrap();
 

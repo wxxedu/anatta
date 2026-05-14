@@ -26,7 +26,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::id_mint::{map_tool_call_id, view_session_id};
 use super::{Engine, TranscodeError, TranscodeInput, TranscodeOutput};
@@ -199,7 +199,10 @@ fn transcode_user<W: Write>(v: &Value, out: &mut W) -> Result<(), TranscodeError
                     writeln!(out, "{}", item)?;
                 }
                 "tool_result" => {
-                    let tool_use_id = block.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                    let tool_use_id = block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     let mapped = map_tool_call_id(tool_use_id, Engine::Claude, Engine::Codex);
                     let output = stringify_tool_result_content(block.get("content"));
                     let now = chrono::Utc::now().to_rfc3339();
@@ -285,12 +288,12 @@ fn transcode_attachment<W: Write>(v: &Value, out: &mut W) -> Result<(), Transcod
     emit_codex_message(out, "user", &text)
 }
 
-fn emit_codex_message<W: Write>(
-    out: &mut W,
-    role: &str,
-    text: &str,
-) -> Result<(), TranscodeError> {
-    let content_type = if role == "assistant" { "output_text" } else { "input_text" };
+fn emit_codex_message<W: Write>(out: &mut W, role: &str, text: &str) -> Result<(), TranscodeError> {
+    let content_type = if role == "assistant" {
+        "output_text"
+    } else {
+        "input_text"
+    };
     let now = chrono::Utc::now().to_rfc3339();
     let item = json!({
         "type": "response_item",
@@ -322,7 +325,9 @@ fn extract_first_text(content: Option<&Value>) -> Option<String> {
 }
 
 fn stringify_tool_result_content(c: Option<&Value>) -> Value {
-    let Some(c) = c else { return Value::String(String::new()) };
+    let Some(c) = c else {
+        return Value::String(String::new());
+    };
     // Claude tool_result.content can be a string OR an array of typed blocks.
     if let Some(s) = c.as_str() {
         return Value::String(s.to_owned());

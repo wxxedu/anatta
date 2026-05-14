@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::process::Command;
 
-use super::pipeline::{spawn_with_pipeline, PipelineHandles};
+use super::pipeline::{PipelineHandles, spawn_with_pipeline};
 use super::{AgentSession, ClaudeSessionId, Launchable, SpawnError};
-use crate::claude::stream::ClaudeStreamEvent;
 use crate::claude::StreamProjector;
+use crate::claude::stream::ClaudeStreamEvent;
 use crate::profile::ClaudeProfile;
 
 /// Configuration for spawning a claude session.

@@ -120,11 +120,9 @@ impl ChatError {
 pub async fn run(args: ChatArgs, cfg: &Config) -> Result<(), ChatError> {
     match args.action {
         None => run_interactive(cfg).await,
-        Some(ChatCommand::New {
-            name,
-            profile,
-            cwd,
-        }) => runner::run_new(name, profile, cwd, cfg).await,
+        Some(ChatCommand::New { name, profile, cwd }) => {
+            runner::run_new(name, profile, cwd, cfg).await
+        }
         Some(ChatCommand::Resume { name }) => runner::run_resume(name, cfg).await,
         Some(ChatCommand::Ls) => run_ls(cfg).await,
         Some(ChatCommand::Rm { name }) => run_rm(name, cfg).await,
@@ -231,7 +229,10 @@ async fn run_ls(cfg: &Config) -> Result<(), ChatError> {
         return Ok(());
     }
     let now = Utc::now();
-    println!("{:<20} {:<22} {:<14} STATUS", "NAME", "PROFILE", "LAST USED");
+    println!(
+        "{:<20} {:<22} {:<14} STATUS",
+        "NAME", "PROFILE", "LAST USED"
+    );
     for row in rows {
         let status = if SessionLock::is_held(&cfg.anatta_home, &row.name) {
             "🔒 in use".to_owned()

@@ -23,8 +23,7 @@ pub trait Projector {
 
     /// Project one raw event into 0+ `AgentEvent`s. `&mut self` so
     /// stateful projectors can accumulate snapshot state across calls.
-    fn project(&mut self, raw: &Self::Raw, ctx: &ProjectionContext)
-        -> Vec<AgentEvent>;
+    fn project(&mut self, raw: &Self::Raw, ctx: &ProjectionContext) -> Vec<AgentEvent>;
 }
 
 /// Caller-supplied defaults for fields that some raw events lack

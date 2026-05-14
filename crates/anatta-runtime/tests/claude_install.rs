@@ -11,7 +11,7 @@
 #![cfg(feature = "installer")]
 
 use anatta_runtime::claude::ClaudeDistribution;
-use anatta_runtime::distribution::{install, VersionRequest};
+use anatta_runtime::distribution::{VersionRequest, install};
 
 #[tokio::test]
 #[ignore = "downloads ~200 MB; run with --ignored"]

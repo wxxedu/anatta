@@ -38,7 +38,9 @@ pub enum AbsorbOutcome {
 pub enum AbsorbError {
     #[error("working file shrunk: previous offset {previous}, current size {current}")]
     WorkingFileShrunk { previous: u64, current: u64 },
-    #[error("central events file unexpectedly larger than expected ({actual} > {expected}) — possible duplicate or external write")]
+    #[error(
+        "central events file unexpectedly larger than expected ({actual} > {expected}) — possible duplicate or external write"
+    )]
     CentralOversize { actual: u64, expected: u64 },
     #[error(transparent)]
     Io(#[from] std::io::Error),

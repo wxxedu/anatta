@@ -91,9 +91,7 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
                 is_error,
             } => {
                 saw_turn_completed = true;
-                eprintln!(
-                    "TurnCompleted stop_reason={stop_reason:?} is_error={is_error}"
-                );
+                eprintln!("TurnCompleted stop_reason={stop_reason:?} is_error={is_error}");
             }
             other => eprintln!("(other) {other:?}"),
         }
@@ -105,7 +103,10 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
         exit.exit_code, exit.duration, exit.events_emitted
     );
     if !exit.stderr_tail.is_empty() {
-        eprintln!("--- stderr tail ---\n{}\n--- end stderr ---", exit.stderr_tail);
+        eprintln!(
+            "--- stderr tail ---\n{}\n--- end stderr ---",
+            exit.stderr_tail
+        );
     }
 
     assert!(saw_session_started, "no SessionStarted event");
@@ -189,7 +190,10 @@ async fn launch_real_codex_emits_session_started_assistant_completion() {
     }
 
     let exit = session.wait().await.expect("wait");
-    eprintln!("exit code={:?} duration={:?}", exit.exit_code, exit.duration);
+    eprintln!(
+        "exit code={:?} duration={:?}",
+        exit.exit_code, exit.duration
+    );
 
     assert!(saw_session_started, "no SessionStarted");
     assert!(saw_assistant_text, "no AssistantText");

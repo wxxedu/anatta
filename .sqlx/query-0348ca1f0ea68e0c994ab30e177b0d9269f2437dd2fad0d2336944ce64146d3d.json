@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                    UPDATE conversation_segments\n                       SET last_absorbed_bytes = ?, render_initial_bytes = ?\n                     WHERE id = ?\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "0348ca1f0ea68e0c994ab30e177b0d9269f2437dd2fad0d2336944ce64146d3d"
+}

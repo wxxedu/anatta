@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT\n                id                   AS \"id!\",\n                conversation_id      AS \"conversation_id!\",\n                ordinal              AS \"ordinal!\",\n                profile_id           AS \"profile_id!\",\n                source_family        AS \"source_family!\",\n                started_at           AS \"started_at!\",\n                ended_at,\n                transition_policy    AS \"transition_policy!\",\n                ended_with_compact   AS \"ended_with_compact!\",\n                last_absorbed_bytes  AS \"last_absorbed_bytes!\",\n                render_initial_bytes AS \"render_initial_bytes!\",\n                backend              AS \"backend!\",\n                engine_session_id\n            FROM conversation_segments\n            WHERE conversation_id = ? AND ended_at IS NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "conversation_id!",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "ordinal!",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "profile_id!",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_family!",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "started_at!",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "ended_at",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "transition_policy!",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "ended_with_compact!",
+        "ordinal": 8,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_absorbed_bytes!",
+        "ordinal": 9,
+        "type_info": "Integer"
+      },
+      {
+        "name": "render_initial_bytes!",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "backend!",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "engine_session_id",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "1c5cc59c95b7492ada686d797b9c0d22b239386ebd2880b0ebbf1895e5b7783d"
+}

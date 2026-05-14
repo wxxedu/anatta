@@ -171,7 +171,10 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_latest_picks_max_version() {
-        let v = CodexDistribution.resolve_version(&VersionRequest::Latest).await.unwrap();
+        let v = CodexDistribution
+            .resolve_version(&VersionRequest::Latest)
+            .await
+            .unwrap();
         assert_eq!(v, "0.125.0");
     }
 
@@ -195,19 +198,39 @@ mod tests {
 
     #[tokio::test]
     async fn download_info_darwin_arm64() {
-        let p = Platform { os: Os::Macos, arch: Arch::Aarch64, libc: Libc::None };
+        let p = Platform {
+            os: Os::Macos,
+            arch: Arch::Aarch64,
+            libc: Libc::None,
+        };
         let info = CodexDistribution.download_info("0.125.0", p).await.unwrap();
-        assert_eq!(info.url, "https://github.com/openai/codex/releases/download/rust-v0.125.0/codex-aarch64-apple-darwin.tar.gz");
-        assert_eq!(info.checksum.hex, "6a926dc0cb9639d349b62beda1907c53cb1349709e7dc9cfc53268f438cb749f");
+        assert_eq!(
+            info.url,
+            "https://github.com/openai/codex/releases/download/rust-v0.125.0/codex-aarch64-apple-darwin.tar.gz"
+        );
+        assert_eq!(
+            info.checksum.hex,
+            "6a926dc0cb9639d349b62beda1907c53cb1349709e7dc9cfc53268f438cb749f"
+        );
         assert_eq!(info.size, Some(74_665_914));
         assert!(matches!(info.format, ArchiveFormat::TarGz));
-        assert_eq!(info.binary_in_archive.as_deref(), Some("codex-aarch64-apple-darwin"));
+        assert_eq!(
+            info.binary_in_archive.as_deref(),
+            Some("codex-aarch64-apple-darwin")
+        );
     }
 
     #[tokio::test]
     async fn download_info_unsupported_platform() {
-        let p = Platform { os: Os::Windows, arch: Arch::X86_64, libc: Libc::None };
-        let err = CodexDistribution.download_info("0.125.0", p).await.unwrap_err();
+        let p = Platform {
+            os: Os::Windows,
+            arch: Arch::X86_64,
+            libc: Libc::None,
+        };
+        let err = CodexDistribution
+            .download_info("0.125.0", p)
+            .await
+            .unwrap_err();
         assert!(matches!(err, DistError::NoPlatformBuild { .. }));
     }
 }

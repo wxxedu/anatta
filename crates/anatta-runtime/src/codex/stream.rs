@@ -324,7 +324,8 @@ mod tests {
 
     #[test]
     fn parses_thread_started() {
-        let line = r#"{"type":"thread.started","thread_id":"019e11a4-ba62-7681-8756-ab48a7cf200d"}"#;
+        let line =
+            r#"{"type":"thread.started","thread_id":"019e11a4-ba62-7681-8756-ab48a7cf200d"}"#;
         match parse(line) {
             CodexStreamEvent::ThreadStarted(e) => {
                 assert_eq!(e.thread_id, "019e11a4-ba62-7681-8756-ab48a7cf200d");
@@ -391,7 +392,8 @@ mod tests {
 
     #[test]
     fn parses_item_completed_reasoning() {
-        let line = r#"{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"think"}}"#;
+        let line =
+            r#"{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"think"}}"#;
         match parse(line) {
             CodexStreamEvent::ItemCompleted(e) => match e.item.details {
                 ThreadItemDetails::Reasoning(r) => assert_eq!(r.text, "think"),

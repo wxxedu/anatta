@@ -119,11 +119,7 @@ pub fn default_family(backend: BackendKind, provider: &str) -> Family {
 
 /// Resolve a profile's family. Override wins; otherwise use the default
 /// derived from `(backend, provider)`.
-pub fn family_of(
-    backend: BackendKind,
-    provider: &str,
-    family_override: Option<&str>,
-) -> Family {
+pub fn family_of(backend: BackendKind, provider: &str, family_override: Option<&str>) -> Family {
     if let Some(o) = family_override {
         Family::parse(o).unwrap_or_else(|| default_family(backend, provider))
     } else {
@@ -153,7 +149,12 @@ mod tests {
 
     #[test]
     fn round_trip_parse() {
-        for f in [Family::ANative, Family::ACompat, Family::ONative, Family::OCompat] {
+        for f in [
+            Family::ANative,
+            Family::ACompat,
+            Family::ONative,
+            Family::OCompat,
+        ] {
             assert_eq!(Family::parse(f.as_str()), Some(f));
         }
         assert_eq!(Family::parse("nonsense"), None);
@@ -174,13 +175,31 @@ mod tests {
 
     #[test]
     fn defaults_match_design() {
-        assert_eq!(default_family(BackendKind::Claude, "anthropic"), Family::ANative);
-        assert_eq!(default_family(BackendKind::Claude, "deepseek"), Family::ACompat);
+        assert_eq!(
+            default_family(BackendKind::Claude, "anthropic"),
+            Family::ANative
+        );
+        assert_eq!(
+            default_family(BackendKind::Claude, "deepseek"),
+            Family::ACompat
+        );
         assert_eq!(default_family(BackendKind::Claude, "kimi"), Family::ACompat);
-        assert_eq!(default_family(BackendKind::Claude, "minimax"), Family::ACompat);
-        assert_eq!(default_family(BackendKind::Claude, "custom"), Family::ACompat);
-        assert_eq!(default_family(BackendKind::Codex, "openai"), Family::ONative);
-        assert_eq!(default_family(BackendKind::Codex, "custom"), Family::OCompat);
+        assert_eq!(
+            default_family(BackendKind::Claude, "minimax"),
+            Family::ACompat
+        );
+        assert_eq!(
+            default_family(BackendKind::Claude, "custom"),
+            Family::ACompat
+        );
+        assert_eq!(
+            default_family(BackendKind::Codex, "openai"),
+            Family::ONative
+        );
+        assert_eq!(
+            default_family(BackendKind::Codex, "custom"),
+            Family::OCompat
+        );
     }
 
     #[test]

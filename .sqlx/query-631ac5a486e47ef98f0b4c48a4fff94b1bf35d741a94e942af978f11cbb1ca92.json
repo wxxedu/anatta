@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT c.id, c.created_at, c.cwd AS \"cwd!\", c.name AS \"name!\"\n            FROM conversations c\n            JOIN conversation_segments s ON s.conversation_id = c.id\n            WHERE s.ended_at IS NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "cwd!",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "name!",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "631ac5a486e47ef98f0b4c48a4fff94b1bf35d741a94e942af978f11cbb1ca92"
+}

@@ -124,7 +124,9 @@ pub fn strip_reasoning<R: BufRead, W: Write>(src: R, mut dst: W) -> Result<(), S
         // NOT another thinking event. If either neighbour is thinking,
         // fall back to blank-in-place rather than relinking through it.
         let child_is_thinking = if n_children == 1 {
-            let single_child = lines.iter().find(|q| q.parent_uuid.as_deref() == Some(&uuid));
+            let single_child = lines
+                .iter()
+                .find(|q| q.parent_uuid.as_deref() == Some(&uuid));
             single_child.map(|q| q.is_thinking_only).unwrap_or(false)
         } else {
             false
@@ -235,7 +237,9 @@ mod tests {
         obj.insert("uuid".into(), Value::String(uuid.into()));
         obj.insert(
             "parentUuid".into(),
-            parent.map(|p| Value::String(p.into())).unwrap_or(Value::Null),
+            parent
+                .map(|p| Value::String(p.into()))
+                .unwrap_or(Value::Null),
         );
         obj.insert("sessionId".into(), Value::String("test-session".into()));
         for (k, v) in body.as_object().cloned().unwrap_or_default() {
@@ -343,7 +347,10 @@ mod tests {
         let a1: Value = serde_json::from_str(lines[1]).unwrap();
         let content = a1.pointer("/message/content/0").unwrap();
         assert_eq!(content.get("thinking").and_then(Value::as_str), Some(""));
-        assert!(content.get("signature").is_none(), "signature should be removed");
+        assert!(
+            content.get("signature").is_none(),
+            "signature should be removed"
+        );
     }
 
     #[test]
@@ -370,7 +377,12 @@ mod tests {
         let input = [
             event("u1", None, "user", user_msg("hello")),
             event("a1", Some("u1"), "assistant", thinking_msg("first", "sig1")),
-            event("a2", Some("a1"), "assistant", thinking_msg("second", "sig2")),
+            event(
+                "a2",
+                Some("a1"),
+                "assistant",
+                thinking_msg("second", "sig2"),
+            ),
             event("a3", Some("a2"), "assistant", text_msg("answer")),
         ]
         .join("\n");
@@ -379,7 +391,11 @@ mod tests {
         // a1 has exactly 1 child (a2), so it WOULD have been splice-droppable...
         // BUT a2 is its child and a2 IS thinking-only, so a1 falls back to blanking.
         // a2's parent (a1) is thinking-only, so a2 also falls back to blanking.
-        assert_eq!(lines.len(), 4, "both thinking events kept (blanked) under invariant violation");
+        assert_eq!(
+            lines.len(),
+            4,
+            "both thinking events kept (blanked) under invariant violation"
+        );
     }
 
     #[test]
@@ -406,6 +422,9 @@ mod tests {
         .join("\n");
         let pass1 = sanitize_str(&input);
         let pass2 = sanitize_str(&pass1);
-        assert_eq!(pass1, pass2, "applying sanitize twice yields the same result");
+        assert_eq!(
+            pass1, pass2,
+            "applying sanitize twice yields the same result"
+        );
     }
 }

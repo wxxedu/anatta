@@ -61,7 +61,13 @@ pub fn synth_claude_uuid(parent_view_id: &str, line_index: usize) -> String {
 fn sanitize_for_id(s: &str) -> String {
     // Keep ascii alnum and dashes; collapse other chars to '-'.
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -186,7 +192,10 @@ mod tests {
     fn sanitize_strips_path_chars() {
         let s = sanitize_for_id("/tmp/foo bar:baz");
         for c in s.chars() {
-            assert!(c.is_ascii_alphanumeric() || c == '-', "non-id char survived: {c}");
+            assert!(
+                c.is_ascii_alphanumeric() || c == '-',
+                "non-id char survived: {c}"
+            );
         }
     }
 }

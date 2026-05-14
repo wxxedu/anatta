@@ -209,9 +209,7 @@ pub enum SwapError {
     /// Tier 1/2 historical variant kept for callers that need to
     /// distinguish "would have been rejected pre-tier-3" — tier 3
     /// no longer raises this; cross-backend swap proceeds.
-    #[error(
-        "cross-backend swap not supported (current: {current:?}, target: {target:?})"
-    )]
+    #[error("cross-backend swap not supported (current: {current:?}, target: {target:?})")]
     BackendMismatch {
         current: BackendKind,
         target: BackendKind,
@@ -380,4 +378,3 @@ impl TurnEvents {
         }
     }
 }
-

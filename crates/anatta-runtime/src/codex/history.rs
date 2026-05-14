@@ -550,7 +550,8 @@ mod tests {
         let ev = parse(line);
         match ev.kind {
             CodexEventKind::SessionMeta(SessionMeta {
-                source: Some(SessionSource::Origin(SessionOrigin::Cli)), ..
+                source: Some(SessionSource::Origin(SessionOrigin::Cli)),
+                ..
             }) => {}
             other => panic!("wrong shape: {other:?}"),
         }
@@ -562,9 +563,10 @@ mod tests {
         let ev = parse(line);
         match ev.kind {
             CodexEventKind::SessionMeta(SessionMeta {
-                source: Some(SessionSource::Subagent {
-                    subagent: SubagentInfo::Tagged(SubagentDescriptor::ThreadSpawn(t)),
-                }),
+                source:
+                    Some(SessionSource::Subagent {
+                        subagent: SubagentInfo::Tagged(SubagentDescriptor::ThreadSpawn(t)),
+                    }),
                 ..
             }) => assert_eq!(t.depth, 1),
             other => panic!("wrong shape: {other:?}"),
@@ -577,9 +579,10 @@ mod tests {
         let ev = parse(line);
         match ev.kind {
             CodexEventKind::SessionMeta(SessionMeta {
-                source: Some(SessionSource::Subagent {
-                    subagent: SubagentInfo::Plain(s),
-                }),
+                source:
+                    Some(SessionSource::Subagent {
+                        subagent: SubagentInfo::Plain(s),
+                    }),
                 ..
             }) => assert_eq!(s, "review"),
             other => panic!("wrong shape: {other:?}"),
@@ -592,9 +595,10 @@ mod tests {
         let ev = parse(line);
         match ev.kind {
             CodexEventKind::SessionMeta(SessionMeta {
-                source: Some(SessionSource::Subagent {
-                    subagent: SubagentInfo::Tagged(SubagentDescriptor::Other(name)),
-                }),
+                source:
+                    Some(SessionSource::Subagent {
+                        subagent: SubagentInfo::Tagged(SubagentDescriptor::Other(name)),
+                    }),
                 ..
             }) => assert_eq!(name, "guardian"),
             other => panic!("wrong shape: {other:?}"),
@@ -638,11 +642,17 @@ mod tests {
         let r = parse(running);
         let d = parse(done);
         match r.kind {
-            CodexEventKind::EventMsg(EventMsg::CollabCloseEnd { status: CollabStatus::Pending(CollabPendingState::Running), .. }) => {}
+            CodexEventKind::EventMsg(EventMsg::CollabCloseEnd {
+                status: CollabStatus::Pending(CollabPendingState::Running),
+                ..
+            }) => {}
             other => panic!("wrong shape: {other:?}"),
         }
         match d.kind {
-            CodexEventKind::EventMsg(EventMsg::CollabCloseEnd { status: CollabStatus::Completed { completed }, .. }) => {
+            CodexEventKind::EventMsg(EventMsg::CollabCloseEnd {
+                status: CollabStatus::Completed { completed },
+                ..
+            }) => {
                 assert_eq!(completed, "hi");
             }
             other => panic!("wrong shape: {other:?}"),
@@ -690,7 +700,10 @@ mod tests {
         let ev = parse(line);
         match ev.kind {
             CodexEventKind::ResponseItem(ResponseItem::FunctionCall {
-                call_id, name, arguments, ..
+                call_id,
+                name,
+                arguments,
+                ..
             }) => {
                 assert_eq!(call_id, "c1");
                 assert_eq!(name, "shell");

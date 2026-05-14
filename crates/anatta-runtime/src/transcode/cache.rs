@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{transcode_to, Engine, TranscodeError, TranscodeInput, TRANSCODER_VERSION};
+use super::{Engine, TRANSCODER_VERSION, TranscodeError, TranscodeInput, transcode_to};
 
 /// Result of a per-segment cache decision.
 #[derive(Debug)]
@@ -107,10 +107,8 @@ pub fn resolve_for_target(
     let tmp_meta = with_tmp_suffix(&meta_path);
     {
         let mut f = fs::File::create(&tmp_meta)?;
-        let buf = serde_json::to_vec_pretty(&meta).map_err(|e| TranscodeError::Parse {
-            line: 0,
-            source: e,
-        })?;
+        let buf = serde_json::to_vec_pretty(&meta)
+            .map_err(|e| TranscodeError::Parse { line: 0, source: e })?;
         f.write_all(&buf)?;
         f.flush()?;
     }

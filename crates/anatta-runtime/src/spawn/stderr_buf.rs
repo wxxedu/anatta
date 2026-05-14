@@ -15,7 +15,9 @@ impl Handle {
     }
 
     pub fn append(&self, bytes: &[u8]) {
-        let Ok(mut buf) = self.inner.lock() else { return };
+        let Ok(mut buf) = self.inner.lock() else {
+            return;
+        };
         buf.extend_from_slice(bytes);
         // Roll: keep only the trailing MAX_BYTES. Cheap because we only
         // copy when over budget.
@@ -26,7 +28,9 @@ impl Handle {
     }
 
     pub fn snapshot(&self) -> String {
-        let Ok(buf) = self.inner.lock() else { return String::new() };
+        let Ok(buf) = self.inner.lock() else {
+            return String::new();
+        };
         String::from_utf8_lossy(&buf).into_owned()
     }
 }

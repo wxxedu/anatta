@@ -30,7 +30,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::id_mint::{map_tool_call_id, synth_claude_uuid, view_session_id};
 use super::{Engine, TranscodeError, TranscodeInput, TranscodeOutput};
@@ -132,7 +132,10 @@ impl EmitState {
         );
         m.insert("sessionId".to_owned(), Value::String(self.view_id.clone()));
         m.insert("cwd".to_owned(), Value::String(self.cwd.clone()));
-        m.insert("timestamp".to_owned(), Value::String(chrono::Utc::now().to_rfc3339()));
+        m.insert(
+            "timestamp".to_owned(),
+            Value::String(chrono::Utc::now().to_rfc3339()),
+        );
         writeln!(out, "{}", obj)?;
         self.prev_uuid = Some(uuid);
         Ok(())
@@ -148,26 +151,24 @@ fn transcode_one<W: Write>(
     let payload = v.get("payload").unwrap_or(&Value::Null);
 
     match event_type {
-        "session_meta" => {
-            if !state.seen_first_session_meta {
-                state.seen_first_session_meta = true;
-                // Defer system/init emission until we also have a turn_context
-                // (so we can include model). If turn_context never arrives,
-                // emit system/init on first response_item.
-            }
-            // Subsequent session_metas (shouldn't happen) dropped.
+        // First session_meta: defer system/init emission until we also
+        // have a turn_context (so we can include model). If turn_context
+        // never arrives, emit system/init on first response_item.
+        // Subsequent session_metas (shouldn't happen) are dropped.
+        "session_meta" if !state.seen_first_session_meta => {
+            state.seen_first_session_meta = true;
         }
-        "turn_context" => {
-            if !state.seen_first_turn_context {
-                state.seen_first_turn_context = true;
-                state.model = payload
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned();
-            }
-            // Mid-session turn_contexts dropped.
+        "session_meta" => {}
+        // First turn_context: capture model. Mid-session turn_contexts dropped.
+        "turn_context" if !state.seen_first_turn_context => {
+            state.seen_first_turn_context = true;
+            state.model = payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
         }
+        "turn_context" => {}
         "response_item" => {
             ensure_session_init(state, out)?;
             transcode_response_item(payload, state, out)?;
@@ -186,10 +187,7 @@ fn transcode_one<W: Write>(
     Ok(())
 }
 
-fn ensure_session_init<W: Write>(
-    state: &mut EmitState,
-    out: &mut W,
-) -> Result<(), TranscodeError> {
+fn ensure_session_init<W: Write>(state: &mut EmitState, out: &mut W) -> Result<(), TranscodeError> {
     if state.session_init_emitted {
         return Ok(());
     }
@@ -220,7 +218,7 @@ fn transcode_response_item<W: Write>(
         "custom_tool_call_output" => transcode_function_call_output(payload, state, out),
         "web_search_call" => transcode_web_search_call(payload, state, out),
         "ghost_snapshot" => Ok(()), // drop
-        _ => Ok(()),                 // unknown: drop
+        _ => Ok(()),                // unknown: drop
     }
 }
 
@@ -266,7 +264,11 @@ fn transcode_message<W: Write>(
     if claude_blocks.is_empty() {
         return Ok(());
     }
-    let event_type = if claude_role == "user" { "user" } else { "assistant" };
+    let event_type = if claude_role == "user" {
+        "user"
+    } else {
+        "assistant"
+    };
     let obj = json!({
         "type": event_type,
         "message": {
@@ -284,7 +286,10 @@ fn transcode_function_call<W: Write>(
 ) -> Result<(), TranscodeError> {
     let call_id = payload.get("call_id").and_then(Value::as_str).unwrap_or("");
     let name = payload.get("name").and_then(Value::as_str).unwrap_or("");
-    let args_str = payload.get("arguments").and_then(Value::as_str).unwrap_or("{}");
+    let args_str = payload
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
     let input: Value = serde_json::from_str(args_str).unwrap_or(Value::Object(Default::default()));
     let mapped = map_tool_call_id(call_id, Engine::Codex, Engine::Claude);
     let obj = json!({
@@ -375,11 +380,9 @@ fn transcode_event_msg<W: Write>(
 ) -> Result<(), TranscodeError> {
     let kind = payload.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
-        "context_compacted" => emit_compact_boundary_and_summary(
-            &json!({"message": ""}),
-            state,
-            out,
-        ),
+        "context_compacted" => {
+            emit_compact_boundary_and_summary(&json!({"message": ""}), state, out)
+        }
         // The rest are duplicates of response_item content or codex-internal
         // UI signals; drop.
         _ => Ok(()),

@@ -104,10 +104,7 @@ fn print_help() {
     );
 }
 
-async fn handle_profile(
-    current: &ProfileRecord,
-    cfg: &Config,
-) -> Result<SlashOutcome, ChatError> {
+async fn handle_profile(current: &ProfileRecord, cfg: &Config) -> Result<SlashOutcome, ChatError> {
     let profiles = cfg.store.list_profiles().await?;
     if profiles.is_empty() {
         eprintln!("no profiles configured");

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE conversation_segments\n               SET ended_at = ?, ended_with_compact = ?\n             WHERE id = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5d49bbb0550275e207b00c3edfea4f73faf7f0dedc2df46983043f7534e4d864"
+}
