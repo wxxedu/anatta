@@ -158,7 +158,9 @@ pub struct ClaudeInteractiveLaunch {
     pub model: Option<String>,
     /// If true, pass `--bare` for a minimal child environment
     /// (no hooks / LSP / plugin sync / CLAUDE.md auto-discovery /
-    /// keychain reads). Defaults to true — anatta owns the environment.
+    /// keychain reads). The CLI's `build_claude_interactive` derives this
+    /// from `auth_method` — `true` for ApiKey profiles, `false` for Login/
+    /// OAuth profiles (which need keychain access that `--bare` disables).
     pub bare: bool,
 }
 
@@ -276,7 +278,7 @@ impl ClaudeInteractiveSession {
             cmd.arg(session_id.as_str());
         }
 
-        let mut child = pair
+        let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| SpawnError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
