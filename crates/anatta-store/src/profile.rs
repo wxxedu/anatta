@@ -68,6 +68,10 @@ pub struct ProfileRecord {
     pub default_sonnet_model_override: Option<String>,
     pub default_haiku_model_override:  Option<String>,
     pub subagent_model_override:       Option<String>,
+
+    /// Family override (NULL = derive from (backend, provider)). Added
+    /// in migration 0006. Valid: 'a-native'|'a-compat'|'o-native'|'o-compat'.
+    pub family_override:               Option<String>,
 }
 
 /// What the caller passes to insert a new row.
@@ -86,6 +90,7 @@ pub struct NewProfile<'a> {
     pub default_sonnet_model_override: Option<&'a str>,
     pub default_haiku_model_override:  Option<&'a str>,
     pub subagent_model_override:       Option<&'a str>,
+    pub family_override:               Option<&'a str>,
 }
 
 /// Internal flat row, populated directly by `sqlx::query_as!`.
@@ -104,6 +109,7 @@ struct ProfileRow {
     default_sonnet_model_override: Option<String>,
     default_haiku_model_override:  Option<String>,
     subagent_model_override:       Option<String>,
+    family_override:               Option<String>,
 }
 
 impl ProfileRow {
@@ -123,6 +129,7 @@ impl ProfileRow {
             default_sonnet_model_override: self.default_sonnet_model_override,
             default_haiku_model_override:  self.default_haiku_model_override,
             subagent_model_override:       self.subagent_model_override,
+            family_override:               self.family_override,
         })
     }
 }
@@ -144,9 +151,10 @@ impl Store {
                 default_opus_model_override,
                 default_sonnet_model_override,
                 default_haiku_model_override,
-                subagent_model_override
+                subagent_model_override,
+                family_override
             )
-            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             p.id,
             backend,
@@ -161,6 +169,7 @@ impl Store {
             p.default_sonnet_model_override,
             p.default_haiku_model_override,
             p.subagent_model_override,
+            p.family_override,
         )
         .execute(&self.pool)
         .await?;
@@ -187,7 +196,8 @@ impl Store {
                 default_opus_model_override,
                 default_sonnet_model_override,
                 default_haiku_model_override,
-                subagent_model_override
+                subagent_model_override,
+                family_override
             FROM profile
             ORDER BY COALESCE(last_used_at, created_at) DESC
             "#
@@ -215,7 +225,8 @@ impl Store {
                 default_opus_model_override,
                 default_sonnet_model_override,
                 default_haiku_model_override,
-                subagent_model_override
+                subagent_model_override,
+                family_override
             FROM profile
             WHERE id = ?
             "#,
@@ -275,6 +286,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: None,
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();
@@ -304,6 +316,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: None,
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();
@@ -322,6 +335,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: None,
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();
@@ -354,6 +368,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: None,
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();
@@ -371,6 +386,7 @@ mod tests {
                 default_sonnet_model_override: None,
                 default_haiku_model_override: None,
                 subagent_model_override: None,
+            family_override: None,
             })
             .await
             .unwrap_err();
@@ -393,6 +409,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: None,
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();
@@ -422,6 +439,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: Some("deepseek-v4-flash"),
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();
@@ -453,6 +471,7 @@ mod tests {
             default_sonnet_model_override: None,
             default_haiku_model_override: None,
             subagent_model_override: None,
+            family_override: None,
         })
         .await
         .unwrap();

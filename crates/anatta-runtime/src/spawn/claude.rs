@@ -54,7 +54,11 @@ impl Launchable for ClaudeLaunch {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--verbose")
-            .arg("--include-partial-messages");
+            .arg("--include-partial-messages")
+            // anatta orchestrates the conversation lifecycle (segment locking,
+            // workspace, etc.); claude's interactive permission prompts are
+            // never visible in `--print` mode and stall the turn. Bypass them.
+            .arg("--dangerously-skip-permissions");
         if let Some(id) = &self.resume {
             cmd.arg("--resume").arg(id.as_str());
         }

@@ -55,6 +55,13 @@ pub enum ProfileCommand {
         /// Override `CLAUDE_CODE_SUBAGENT_MODEL`.
         #[arg(long)]
         subagent_model: Option<String>,
+        /// Override the family classification (anthropic vs 3rd-party-compat).
+        /// Valid: `a-native`, `a-compat`, `o-native`, `o-compat`. Use this
+        /// to mark a `provider=custom` profile as native, or vice versa.
+        /// Defaults to safe-by-default: native only for known direct
+        /// providers (`anthropic` / `openai`); everything else is compat.
+        #[arg(long, value_name = "FAMILY")]
+        family: Option<String>,
     },
     /// List all configured profiles.
     List,
@@ -136,6 +143,8 @@ pub enum ProfileCmdError {
         provider: String,
         auth: &'static str,
     },
+    #[error("invalid --family value: {0:?} (allowed: a-native, a-compat, o-native, o-compat)")]
+    BadFamily(String),
 }
 
 pub async fn run(cmd: ProfileCommand, cfg: &Config) -> Result<(), ProfileCmdError> {
@@ -154,11 +163,13 @@ pub async fn run(cmd: ProfileCommand, cfg: &Config) -> Result<(), ProfileCmdErro
             sonnet_model,
             haiku_model,
             subagent_model,
+            family,
         } => {
             create(
                 cfg, backend, name, auth, api_key, non_interactive,
                 provider, base_url, model, small_fast_model,
                 opus_model, sonnet_model, haiku_model, subagent_model,
+                family,
             )
             .await
         }
@@ -188,6 +199,7 @@ async fn create(
     sonnet_model_flag: Option<String>,
     haiku_model_flag: Option<String>,
     subagent_model_flag: Option<String>,
+    family_flag: Option<String>,
 ) -> Result<(), ProfileCmdError> {
     let theme = ColorfulTheme::default();
 
@@ -314,6 +326,28 @@ async fn create(
         return Err(ProfileCmdError::InputRequired("base-url"));
     }
 
+    // 6b. Validate `--family` if supplied; warn on footgun combinations.
+    if let Some(ref fam) = family_flag {
+        if !matches!(fam.as_str(), "a-native" | "a-compat" | "o-native" | "o-compat") {
+            return Err(ProfileCmdError::BadFamily(fam.clone()));
+        }
+    }
+    // Footgun warning: provider=anthropic + base_url_override implies the
+    // user has pointed an "anthropic" profile at some other endpoint. Our
+    // default classification still says ANative; we surface a one-line
+    // hint so the user can opt to use `--family a-compat`.
+    if provider_id == "anthropic" && base_url_flag.is_some() && family_flag.is_none() {
+        eprintln!(
+            "warning: provider=anthropic with --base-url override; the profile will be classified as 'a-native' (signature-validating)."
+        );
+        eprintln!(
+            "    If your upstream endpoint does NOT validate Anthropic thinking-block signatures (most 3rd-party proxies don't),"
+        );
+        eprintln!(
+            "    pass `--family a-compat` to avoid API failures when this profile resumes a strict-family conversation."
+        );
+    }
+
     // 7. mint id, create on-disk profile
     let (profile_path, id_string): (std::path::PathBuf, String) = match backend {
         BackendKind::Claude => {
@@ -369,6 +403,7 @@ async fn create(
             default_sonnet_model_override: sonnet_model_flag.as_deref(),
             default_haiku_model_override: haiku_model_flag.as_deref(),
             subagent_model_override: subagent_model_flag.as_deref(),
+            family_override: family_flag.as_deref(),
         })
         .await
     {

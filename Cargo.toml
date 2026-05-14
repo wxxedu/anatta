@@ -30,3 +30,6 @@ chrono     = { version = "0.4", default-features = false, features = ["serde", "
 
 # Errors
 thiserror  = "2"
+
+# IDs (anatta-owned: conversation.id, segment.id)
+ulid       = "1"

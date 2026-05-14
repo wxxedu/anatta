@@ -3,6 +3,7 @@
 mod auth;
 mod chat;
 mod config;
+mod conversation;
 mod launch;
 mod profile;
 mod send;

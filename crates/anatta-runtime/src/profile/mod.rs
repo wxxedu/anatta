@@ -13,10 +13,14 @@
 
 mod claude;
 mod codex;
+pub mod family;
+pub mod policy;
 pub mod providers;
 
 pub use claude::ClaudeProfile;
 pub use codex::CodexProfile;
+pub use family::{default_family, family_of, BackendKind, Family};
+pub use policy::{min_policy_for, CompactSummary, SegmentRenderPolicy};
 pub use providers::{Overrides, ProviderEnv, ProviderSpec, Tier};
 
 use std::fmt;

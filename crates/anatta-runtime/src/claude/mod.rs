@@ -17,8 +17,10 @@
 pub mod history;
 pub mod stream;
 pub mod projector;
+pub mod sanitize;
 
 pub use projector::{HistoryProjector, StreamProjector};
+pub use sanitize::{strip_reasoning, SanitizeError};
 
 #[cfg(feature = "installer")]
 mod distribution;
