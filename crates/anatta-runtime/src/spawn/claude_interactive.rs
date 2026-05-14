@@ -258,7 +258,7 @@ impl ClaudeInteractiveSession {
             cmd.arg(session_id.as_str());
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| SpawnError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
@@ -314,14 +314,15 @@ impl ClaudeInteractiveSession {
             .to_str()
             .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
         let jsonl = working_jsonl_path(&launch.profile.path, cwd_str, session_id.as_str());
-        wait_for_jsonl(&jsonl, STARTUP_TIMEOUT)
-            .await
-            .map_err(|e| SpawnError::Io(std::io::Error::other(format!(
+        if let Err(e) = wait_for_jsonl(&jsonl, STARTUP_TIMEOUT).await {
+            let _ = child.kill(); // best-effort cleanup; child may already be gone
+            return Err(SpawnError::Io(std::io::Error::other(format!(
                 "claude did not write its session JSONL at {} within {:?}: {}",
                 jsonl.display(),
                 STARTUP_TIMEOUT,
                 e,
-            ))))?;
+            ))));
+        }
 
         let active_turn: Arc<Mutex<Option<ActiveTurn>>> = Arc::new(Mutex::new(None));
         let events_emitted = Arc::new(AtomicU64::new(0));
