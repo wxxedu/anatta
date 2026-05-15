@@ -49,6 +49,20 @@ impl PermissionLevel {
             PermissionLevel::BypassAll => "bypass all",
         }
     }
+
+    /// Value to pass as `claude --permission-mode <value>`. The string
+    /// must be one of claude's documented choices: `default | acceptEdits
+    /// | auto | bypassPermissions | plan | dontAsk` (we don't expose
+    /// `dontAsk` — see plan rationale).
+    pub fn claude_arg(self) -> &'static str {
+        match self {
+            PermissionLevel::Default => "default",
+            PermissionLevel::AcceptEdits => "acceptEdits",
+            PermissionLevel::Auto => "auto",
+            PermissionLevel::BypassAll => "bypassPermissions",
+            PermissionLevel::Plan => "plan",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -83,5 +97,14 @@ mod tests {
             assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == ' '));
             assert!(label.len() <= 16);
         }
+    }
+
+    #[test]
+    fn claude_arg_matches_known_mode_names() {
+        assert_eq!(PermissionLevel::Default.claude_arg(), "default");
+        assert_eq!(PermissionLevel::AcceptEdits.claude_arg(), "acceptEdits");
+        assert_eq!(PermissionLevel::Auto.claude_arg(), "auto");
+        assert_eq!(PermissionLevel::BypassAll.claude_arg(), "bypassPermissions");
+        assert_eq!(PermissionLevel::Plan.claude_arg(), "plan");
     }
 }
