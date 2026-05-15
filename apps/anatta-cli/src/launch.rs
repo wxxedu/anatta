@@ -159,6 +159,7 @@ fn build_claude_interactive(
         provider,
         model: record.model_override.clone(),
         bare,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
 }
 

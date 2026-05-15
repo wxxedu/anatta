@@ -168,6 +168,10 @@ pub struct ClaudeInteractiveLaunch {
     /// from `auth_method` — `true` for ApiKey profiles, `false` for Login/
     /// OAuth profiles (which need keychain access that `--bare` disables).
     pub bare: bool,
+    /// Initial permission level. Mapped to `--permission-mode <value>`
+    /// at spawn; the session tracks subsequent transitions via
+    /// `set_permission_level`.
+    pub permission_level: anatta_core::PermissionLevel,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -206,6 +210,10 @@ pub struct ClaudeInteractiveSession {
     stderr: stderr_buf::Handle,
     started_at: Instant,
     events_emitted: Arc<AtomicU64>,
+    /// Last level we instructed claude to be at. Used to compute the
+    /// number of `\x1b[Z` (Shift+Tab) writes needed to reach a new
+    /// target without scraping the TUI's status bar.
+    current_level: std::sync::Mutex<anatta_core::PermissionLevel>,
 }
 
 /// Cloneable handle for interrupting the active turn from outside — see
@@ -282,23 +290,8 @@ impl ClaudeInteractiveSession {
             }
         }
         cmd.cwd(launch.cwd.as_os_str());
-        // `dontAsk` is the only mode that:
-        //   1. Skips the `bypassPermissions` startup confirmation dialog
-        //      (which `--dangerously-skip-permissions` / `--permission-mode
-        //      bypassPermissions` both show in interactive mode and which
-        //      eats the first bracketed-paste prompt).
-        //   2. Hard-denies interactive tools like `AskUserQuestion` with a
-        //      structured error claude knows to recover from, rather than
-        //      letting them invoke and hang against anatta's sunk PTY.
-        //
-        // The trade-off: any tool that *requires* user input from inside
-        // a session cannot work until anatta grows a tool-result round-trip
-        // (render the question to its own REPL, capture an answer, ship
-        // it back as a `tool_result` event). Claude code's denial message
-        // explicitly suggests fallback tools, so this is graceful, not
-        // fatal.
         cmd.arg("--permission-mode");
-        cmd.arg("dontAsk");
+        cmd.arg(launch.permission_level.claude_arg());
         if launch.bare {
             cmd.arg("--bare");
         }
@@ -404,6 +397,7 @@ impl ClaudeInteractiveSession {
             stderr: stderr_handle,
             started_at: Instant::now(),
             events_emitted,
+            current_level: std::sync::Mutex::new(launch.permission_level),
         })
     }
 
