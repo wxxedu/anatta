@@ -74,6 +74,7 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
         resume: None,
         binary_path: bin,
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let mut session = launch.launch().await.expect("launch");

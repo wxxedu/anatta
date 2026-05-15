@@ -111,6 +111,7 @@ fn build_claude(
         resume: resume.map(ClaudeSessionId::new),
         binary_path,
         provider,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
 }
 
