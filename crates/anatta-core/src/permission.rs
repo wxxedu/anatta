@@ -63,6 +63,51 @@ impl PermissionLevel {
             PermissionLevel::Plan => "plan",
         }
     }
+
+    /// Codex-side policy resolved from a [`PermissionLevel`]. The first
+    /// two fields are passed per-turn in the `turn/start` JSON-RPC body;
+    /// `reviewer_armed` requires session-level configuration (`-c
+    /// approvals_reviewer=auto_review` at codex CLI startup).
+    pub fn codex_policy(self) -> CodexPolicy {
+        match self {
+            PermissionLevel::Default => CodexPolicy {
+                approval: "on-request",
+                sandbox: "workspace-write",
+                reviewer_armed: false,
+            },
+            PermissionLevel::AcceptEdits => CodexPolicy {
+                approval: "never",
+                sandbox: "workspace-write",
+                reviewer_armed: false,
+            },
+            PermissionLevel::Auto => CodexPolicy {
+                approval: "on-request",
+                sandbox: "workspace-write",
+                reviewer_armed: true,
+            },
+            PermissionLevel::BypassAll => CodexPolicy {
+                approval: "never",
+                sandbox: "danger-full-access",
+                reviewer_armed: false,
+            },
+            PermissionLevel::Plan => CodexPolicy {
+                approval: "on-request",
+                sandbox: "read-only",
+                reviewer_armed: false,
+            },
+        }
+    }
+}
+
+/// Codex-side policy resolved from a [`PermissionLevel`]. The first
+/// two fields are passed per-turn in the `turn/start` JSON-RPC body;
+/// `reviewer_armed` requires session-level configuration (`-c
+/// approvals_reviewer=auto_review` at codex CLI startup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexPolicy {
+    pub approval: &'static str,
+    pub sandbox: &'static str,
+    pub reviewer_armed: bool,
 }
 
 #[cfg(test)]
@@ -106,5 +151,33 @@ mod tests {
         assert_eq!(PermissionLevel::Auto.claude_arg(), "auto");
         assert_eq!(PermissionLevel::BypassAll.claude_arg(), "bypassPermissions");
         assert_eq!(PermissionLevel::Plan.claude_arg(), "plan");
+    }
+
+    #[test]
+    fn codex_policy_matches_design_table() {
+        let p = PermissionLevel::Default.codex_policy();
+        assert_eq!(p.approval, "on-request");
+        assert_eq!(p.sandbox, "workspace-write");
+        assert_eq!(p.reviewer_armed, false);
+
+        let p = PermissionLevel::AcceptEdits.codex_policy();
+        assert_eq!(p.approval, "never");
+        assert_eq!(p.sandbox, "workspace-write");
+        assert_eq!(p.reviewer_armed, false);
+
+        let p = PermissionLevel::Auto.codex_policy();
+        assert_eq!(p.approval, "on-request");
+        assert_eq!(p.sandbox, "workspace-write");
+        assert_eq!(p.reviewer_armed, true);
+
+        let p = PermissionLevel::BypassAll.codex_policy();
+        assert_eq!(p.approval, "never");
+        assert_eq!(p.sandbox, "danger-full-access");
+        assert_eq!(p.reviewer_armed, false);
+
+        let p = PermissionLevel::Plan.codex_policy();
+        assert_eq!(p.approval, "on-request");
+        assert_eq!(p.sandbox, "read-only");
+        assert_eq!(p.reviewer_armed, false);
     }
 }
