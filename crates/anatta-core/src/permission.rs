@@ -24,19 +24,39 @@ pub enum PermissionLevel {
 }
 
 impl PermissionLevel {
-    /// Cycle order used by the Shift+Tab keybinding.
-    pub const CYCLE: [PermissionLevel; 5] = [
+    /// Cycle order used by the Shift+Tab keybinding. Matches claude's
+    /// own TUI cycle when the session is launched with
+    /// `--permission-mode bypassPermissions`: bypass → default →
+    /// accept-edits → auto and back. Sessions launched in any other
+    /// initial mode (e.g., `plan`) see a shorter cycle, so we always
+    /// launch in `bypassPermissions` to expose the full rotation.
+    ///
+    /// `Plan` is intentionally not part of the rotation — it's only
+    /// selectable via the `--permission-mode plan` CLI flag at startup.
+    pub const CYCLE: [PermissionLevel; 4] = [
+        PermissionLevel::BypassAll,
+        PermissionLevel::Default,
+        PermissionLevel::AcceptEdits,
+        PermissionLevel::Auto,
+    ];
+
+    /// Every variant, used by code that needs to enumerate all
+    /// permission levels (e.g., reverse-mapping codex policy → level).
+    pub const ALL: [PermissionLevel; 5] = [
+        PermissionLevel::Plan,
         PermissionLevel::Default,
         PermissionLevel::AcceptEdits,
         PermissionLevel::Auto,
         PermissionLevel::BypassAll,
-        PermissionLevel::Plan,
     ];
 
-    /// Next level in the cycle. Wraps around.
+    /// Next level in the cycle. Wraps around. Levels outside the cycle
+    /// (only `Plan`) advance into the cycle at its first slot.
     pub fn next(self) -> Self {
-        let idx = Self::CYCLE.iter().position(|&l| l == self).unwrap_or(0);
-        Self::CYCLE[(idx + 1) % Self::CYCLE.len()]
+        match Self::CYCLE.iter().position(|&l| l == self) {
+            Some(idx) => Self::CYCLE[(idx + 1) % Self::CYCLE.len()],
+            None => Self::CYCLE[0],
+        }
     }
 
     /// Short human-readable label used in the REPL status line.
@@ -115,9 +135,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn next_cycles_through_all_levels_in_order() {
-        let mut cur = PermissionLevel::Default;
-        let order: Vec<_> = (0..5)
+    fn next_cycles_through_all_cycle_levels_in_order() {
+        let mut cur = PermissionLevel::BypassAll;
+        let order: Vec<_> = (0..4)
             .map(|_| {
                 let next = cur.next();
                 cur = next;
@@ -127,23 +147,24 @@ mod tests {
         assert_eq!(
             order,
             vec![
+                PermissionLevel::Default,
                 PermissionLevel::AcceptEdits,
                 PermissionLevel::Auto,
                 PermissionLevel::BypassAll,
-                PermissionLevel::Plan,
-                PermissionLevel::Default,
             ]
         );
     }
 
     #[test]
-    fn next_wraps_around_after_plan() {
-        assert_eq!(PermissionLevel::Plan.next(), PermissionLevel::Default);
+    fn next_from_plan_enters_cycle_at_bypass_all() {
+        // Plan is outside the rotation; first Shift+Tab drops you into
+        // the cycle at its first slot.
+        assert_eq!(PermissionLevel::Plan.next(), PermissionLevel::BypassAll);
     }
 
     #[test]
     fn label_is_short_and_lowercase() {
-        for l in PermissionLevel::CYCLE {
+        for l in PermissionLevel::ALL {
             let label = l.label();
             assert!(label.chars().all(|c| c.is_ascii_lowercase() || c == ' '));
             assert!(label.len() <= 16);
