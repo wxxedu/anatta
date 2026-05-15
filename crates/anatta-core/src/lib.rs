@@ -8,7 +8,9 @@
 //! values.
 
 pub mod agent_event;
+pub mod permission;
 pub mod projector;
 
 pub use agent_event::{AgentEvent, AgentEventEnvelope, AgentEventPayload, Backend};
+pub use permission::PermissionLevel;
 pub use projector::{ProjectionContext, Projector};
