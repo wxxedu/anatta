@@ -31,6 +31,17 @@ impl Projector for HistoryProjector {
 
     fn project(&mut self, ev: &Self::Raw, ctx: &ProjectionContext) -> Vec<AgentEvent> {
         match ev {
+            // Drop assistant turns synthesized by claude code itself
+            // (slash-command acknowledgements like "No response
+            // requested." after `/exit`). Marker: `message.model ==
+            // "<synthetic>"`. These have zero tokens and are not
+            // model output; rendering them shows up as a ghost reply
+            // when a subsequent session resumes the JSONL.
+            history::ClaudeEvent::Assistant(a) if a.message.model == "<synthetic>" => Vec::new(),
+            // Drop user turns flagged `isMeta: true` (claude code's
+            // local-command caveat and similar transcript-only events
+            // that aren't real user input).
+            history::ClaudeEvent::User(u) if u.is_meta == Some(true) => Vec::new(),
             history::ClaudeEvent::Assistant(a) => assistant(a, ctx),
             history::ClaudeEvent::User(u) => user(u, ctx),
             history::ClaudeEvent::System(s) => system(s, ctx),
@@ -599,6 +610,28 @@ mod tests {
             session_id: "test-session".into(),
             received_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
         }
+    }
+
+    #[test]
+    fn history_synthetic_assistant_is_filtered() {
+        // Claude code synthesizes assistant turns (model="<synthetic>")
+        // to acknowledge slash commands like `/exit`. The projector
+        // should drop these so they don't surface as ghost replies.
+        let line = r#"{"type":"assistant","uuid":"u","parentUuid":null,"sessionId":"s","timestamp":"2026-05-10T12:00:00Z","cwd":"/x","gitBranch":"main","isSidechain":false,"userType":"external","entrypoint":"cli","version":"2.1","message":{"id":"m","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"No response requested."}],"stop_reason":"stop_sequence","stop_sequence":"","usage":{"input_tokens":0,"output_tokens":0}}}"#;
+        let ev: history::ClaudeEvent = serde_json::from_str(line).unwrap();
+        let mut p = HistoryProjector::new();
+        assert!(p.project(&ev, &ctx()).is_empty());
+    }
+
+    #[test]
+    fn history_meta_user_event_is_filtered() {
+        // Claude code marks the `<local-command-caveat>` user event with
+        // `isMeta: true`. It's transcript-only, not real user input;
+        // the projector should drop it.
+        let line = r#"{"type":"user","uuid":"u","parentUuid":null,"sessionId":"s","timestamp":"2026-05-10T12:00:00Z","cwd":"/x","gitBranch":"main","isSidechain":false,"userType":"external","entrypoint":"cli","version":"2.1","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>...</local-command-caveat>"}}"#;
+        let ev: history::ClaudeEvent = serde_json::from_str(line).unwrap();
+        let mut p = HistoryProjector::new();
+        assert!(p.project(&ev, &ctx()).is_empty());
     }
 
     #[test]

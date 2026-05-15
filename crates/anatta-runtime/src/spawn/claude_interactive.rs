@@ -650,16 +650,19 @@ impl InteractiveTurnHandle {
 }
 
 impl ClaudeInteractiveSession {
-    /// Shut the session down: tell the writer thread to drop the master
-    /// after asking claude to exit, wait up to `CLOSE_GRACE` for natural
-    /// exit, otherwise fall back to closing the PTY and killing the child.
-    /// portable-pty's `Child::wait` is sync, so we drive it on a blocking
-    /// task.
+    /// Shut the session down by sending `/exit` to claude's TUI (the
+    /// only signal that makes claude code run its graceful save-and-exit
+    /// path within a few seconds — SIGHUP via dropped-master does not).
+    /// Wait up to `CLOSE_GRACE` for natural exit; otherwise SIGKILL.
+    /// portable-pty's `Child::wait` is sync, so we drive it on a
+    /// blocking task.
+    ///
+    /// `/exit` causes claude code to synthesize a small `<local-command-*>`
+    /// transcript block + a `model: "<synthetic>"` "No response requested."
+    /// assistant turn into the session JSONL. These pollute the on-disk
+    /// record but are filtered out by `HistoryProjector` before reaching
+    /// any rendered surface (CLI output, central → render pipeline).
     pub async fn close(self) -> Result<ExitInfo, SpawnError> {
-        let _ = self
-            .pty_tx
-            .send(PtyCommand::Write(b"/exit\r".to_vec()))
-            .await;
         let started_at = self.started_at;
         let stderr = self.stderr;
         let events_emitted = self.events_emitted;
@@ -669,6 +672,13 @@ impl ClaudeInteractiveSession {
         // Clone a killer *before* moving `child` into the blocking task so we
         // can send SIGKILL on the timeout path without needing the child handle.
         let mut killer = child.clone_killer();
+
+        // Ask claude to /exit gracefully. SIGHUP alone (via dropping
+        // the PTY master) does not make claude code exit within the
+        // grace window; the slash command does. We accept the small
+        // disk-pollution cost — the projector filters the resulting
+        // synthetic events from every rendered output.
+        let _ = pty_tx.send(PtyCommand::Write(b"/exit\r".to_vec())).await;
 
         let wait_handle = tokio::task::spawn_blocking(move || child.wait());
 
@@ -688,7 +698,8 @@ impl ClaudeInteractiveSession {
                 })
             }
             Err(_) => {
-                // Grace period expired — kill the child so it doesn't linger.
+                // Grace period expired — drop master + SIGKILL the child
+                // so it doesn't linger.
                 let _ = pty_tx.send(PtyCommand::Shutdown).await;
                 let _ = killer.kill();
                 Err(SpawnError::Io(std::io::Error::other(
