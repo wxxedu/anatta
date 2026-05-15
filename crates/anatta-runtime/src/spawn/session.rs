@@ -227,6 +227,42 @@ impl Session {
         Ok(())
     }
 
+    /// Switch the active permission level. Backend-specific:
+    /// - Per-turn claude: updates the launch template; next turn picks it up.
+    /// - Interactive claude: writes Shift+Tab through the PTY now.
+    /// - Codex: per-turn policy flip, or close-and-reopen across Auto/sandbox.
+    pub async fn set_permission_level(
+        &mut self,
+        target: anatta_core::PermissionLevel,
+        // Codex needs the original launch template for reopens.
+        codex_launch_template: Option<CodexLaunch>,
+    ) -> Result<(), SpawnError> {
+        match self {
+            Session::Claude(c) => {
+                c.template.permission_level = target;
+                Ok(())
+            }
+            Session::ClaudeInteractive(c) => c.set_permission_level(target).await,
+            Session::Codex(c) => {
+                let tpl = codex_launch_template.ok_or_else(|| {
+                    SpawnError::Io(std::io::Error::other(
+                        "codex permission swap needs launch template",
+                    ))
+                })?;
+                c.inner.set_permission_level(target, tpl).await
+            }
+        }
+    }
+
+    /// Current permission level on this session.
+    pub async fn permission_level(&self) -> anatta_core::PermissionLevel {
+        match self {
+            Session::Claude(c) => c.template.permission_level,
+            Session::ClaudeInteractive(c) => c.permission_level(),
+            Session::Codex(c) => c.inner.current_level().await,
+        }
+    }
+
     /// Close the session and return final exit info if the backend has
     /// a persistent process to harvest (codex). For claude there is no
     /// session-level process; returns `None`.

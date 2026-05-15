@@ -24,12 +24,12 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::codex::app_server::AppServerProjector;
 use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
-use crate::spawn::{ExitInfo, SpawnError, stderr_buf};
+use crate::spawn::{CodexThreadId, ExitInfo, SpawnError, stderr_buf};
 
+use super::FIRST_TURN_REQUEST_ID;
 use super::handshake::{Handshake, handshake};
 use super::launch::CodexLaunch;
 use super::pump::{persistent_reader_loop, push_synthetic_session_started, write_request};
-use super::{APPROVAL_POLICY, FIRST_TURN_REQUEST_ID};
 
 pub struct PersistentCodexSession {
     child: Child,
@@ -45,6 +45,10 @@ pub struct PersistentCodexSession {
     stderr: stderr_buf::Handle,
     started_at: Instant,
     events_emitted: Arc<AtomicU64>,
+    /// Per-turn policy derived from the session's current permission
+    /// level. Initialized in open(); mutated in set_permission_level
+    /// (Task 9).
+    current_policy: Mutex<anatta_core::CodexPolicy>,
 }
 
 /// Clonable handle for interrupting the currently-active turn of a
@@ -123,6 +127,7 @@ impl TurnHandle {
 impl PersistentCodexSession {
     pub async fn open(launch: CodexLaunch) -> Result<Self, SpawnError> {
         let started_at = Instant::now();
+        let initial_policy = launch.permission_level.codex_policy();
         let Handshake {
             child,
             stdin,
@@ -136,6 +141,7 @@ impl PersistentCodexSession {
             &launch.cwd,
             launch.api_key.as_deref(),
             launch.resume.as_ref().map(|r| r.as_str()),
+            initial_policy,
         )
         .await?;
 
@@ -171,6 +177,7 @@ impl PersistentCodexSession {
             stderr,
             started_at,
             events_emitted,
+            current_policy: Mutex::new(initial_policy),
         })
     }
 
@@ -228,6 +235,13 @@ impl PersistentCodexSession {
         )
         .await?;
 
+        // Snapshot the current policy before acquiring stdin so we
+        // don't hold both locks across the .await.
+        let approval = {
+            let policy = self.current_policy.lock().await;
+            policy.approval
+        };
+
         // Write turn/start.
         let mut stdin_guard = self.stdin.lock().await;
         let stdin = stdin_guard
@@ -240,13 +254,68 @@ impl PersistentCodexSession {
             TurnStartParams {
                 thread_id: &self.thread_id,
                 input: vec![TurnInput::Text { text: prompt }],
-                approval_policy: APPROVAL_POLICY,
+                approval_policy: approval,
                 cwd: &self.cwd_str,
             },
         )
         .await?;
 
         Ok(TurnHandle { events_rx })
+    }
+
+    /// Currently active permission level.
+    pub async fn current_level(&self) -> anatta_core::PermissionLevel {
+        // Re-derive from `current_policy` by reverse-mapping. Cheap; only
+        // 5 levels. Avoids storing the level twice (policy is the
+        // authoritative state).
+        let policy = *self.current_policy.lock().await;
+        for level in anatta_core::PermissionLevel::CYCLE {
+            if level.codex_policy() == policy {
+                return level;
+            }
+        }
+        anatta_core::PermissionLevel::Default
+    }
+
+    /// Switch permission levels.
+    ///
+    /// Same-axis transitions (same sandbox + reviewer): flip `approval`
+    /// in `current_policy`; next `send_turn` carries the new value.
+    ///
+    /// Cross-axis transitions (across the Auto boundary or any sandbox
+    /// change): close the app-server and reopen with the right
+    /// `-c approvals_reviewer=...` flag and `thread/start`/`thread/resume`
+    /// sandbox. History is preserved via `thread/resume`.
+    pub async fn set_permission_level(
+        &mut self,
+        target: anatta_core::PermissionLevel,
+        launch_template: CodexLaunch,
+    ) -> Result<(), SpawnError> {
+        let cur = *self.current_policy.lock().await;
+        let new_policy = target.codex_policy();
+        if cur == new_policy {
+            return Ok(());
+        }
+        let needs_reopen =
+            cur.reviewer_armed != new_policy.reviewer_armed || cur.sandbox != new_policy.sandbox;
+
+        if !needs_reopen {
+            *self.current_policy.lock().await = new_policy;
+            return Ok(());
+        }
+
+        // Cross-axis: close and reopen.
+        let mut new_launch = launch_template;
+        new_launch.permission_level = target;
+        new_launch.resume = Some(CodexThreadId::new(self.thread_id().to_owned()));
+
+        let new_inner = PersistentCodexSession::open(new_launch).await?;
+        let old = std::mem::replace(self, new_inner);
+        // Best-effort close of the old session.
+        let _ = old.close().await;
+        // `current_policy` on the new session was initialized from
+        // `new_launch.permission_level.codex_policy()`, so it matches `new_policy`.
+        Ok(())
     }
 
     /// Close the session: drop stdin (graceful EOF → codex exits),

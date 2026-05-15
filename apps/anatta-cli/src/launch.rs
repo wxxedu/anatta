@@ -111,6 +111,7 @@ fn build_claude(
         resume: resume.map(ClaudeSessionId::new),
         binary_path,
         provider,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
 }
 
@@ -158,6 +159,7 @@ fn build_claude_interactive(
         provider,
         model: record.model_override.clone(),
         bare,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
 }
 
@@ -186,5 +188,6 @@ fn build_codex(
         resume: resume.map(CodexThreadId::new),
         binary_path,
         api_key,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
 }

@@ -74,6 +74,7 @@ async fn launch_real_claude_emits_session_started_assistant_completion() {
         resume: None,
         binary_path: bin,
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let mut session = launch.launch().await.expect("launch");
@@ -183,6 +184,7 @@ async fn launch_real_claude_interactive_emits_session_started_assistant_completi
         // `bare` from `record.auth_method`; this test constructs the launch
         // directly, so it must hard-code the OAuth-compatible value.
         bare: false,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let session = ClaudeInteractiveSession::open(launch).await.expect("open");
@@ -255,6 +257,7 @@ async fn interactive_cancel_closes_turn_channel() {
         // `bare` from `record.auth_method`; this test constructs the launch
         // directly, so it must hard-code the OAuth-compatible value.
         bare: false,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
     .await
     .expect("open");
@@ -302,6 +305,7 @@ async fn launch_real_codex_emits_session_started_assistant_completion() {
         resume: None,
         binary_path: bin,
         api_key: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let mut session = launch.launch().await.expect("launch");

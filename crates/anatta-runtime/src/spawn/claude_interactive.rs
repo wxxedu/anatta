@@ -56,6 +56,19 @@ pub fn encode_prompt_for_test(prompt: &str) -> Vec<u8> {
     encode_prompt(prompt)
 }
 
+/// Number of Shift+Tab keystrokes required to advance claude's
+/// internal permission-mode cursor from `from` to `to`, given that
+/// each Shift+Tab moves one slot forward in `PermissionLevel::CYCLE`.
+pub(crate) fn shift_tab_count(
+    from: anatta_core::PermissionLevel,
+    to: anatta_core::PermissionLevel,
+) -> usize {
+    let cycle = anatta_core::PermissionLevel::CYCLE;
+    let f = cycle.iter().position(|&l| l == from).unwrap_or(0);
+    let t = cycle.iter().position(|&l| l == to).unwrap_or(0);
+    (t + cycle.len() - f) % cycle.len()
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // JSONL tail
 // ──────────────────────────────────────────────────────────────────────
@@ -168,6 +181,10 @@ pub struct ClaudeInteractiveLaunch {
     /// from `auth_method` — `true` for ApiKey profiles, `false` for Login/
     /// OAuth profiles (which need keychain access that `--bare` disables).
     pub bare: bool,
+    /// Initial permission level. Mapped to `--permission-mode <value>`
+    /// at spawn; the session tracks subsequent transitions via
+    /// `set_permission_level`.
+    pub permission_level: anatta_core::PermissionLevel,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -206,6 +223,10 @@ pub struct ClaudeInteractiveSession {
     stderr: stderr_buf::Handle,
     started_at: Instant,
     events_emitted: Arc<AtomicU64>,
+    /// Last level we instructed claude to be at. Used to compute the
+    /// number of `\x1b[Z` (Shift+Tab) writes needed to reach a new
+    /// target without scraping the TUI's status bar.
+    current_level: std::sync::Mutex<anatta_core::PermissionLevel>,
 }
 
 /// Cloneable handle for interrupting the active turn from outside — see
@@ -283,7 +304,7 @@ impl ClaudeInteractiveSession {
         }
         cmd.cwd(launch.cwd.as_os_str());
         cmd.arg("--permission-mode");
-        cmd.arg("dontAsk");
+        cmd.arg(launch.permission_level.claude_arg());
         if launch.bare {
             cmd.arg("--bare");
         }
@@ -389,6 +410,7 @@ impl ClaudeInteractiveSession {
             stderr: stderr_handle,
             started_at: Instant::now(),
             events_emitted,
+            current_level: std::sync::Mutex::new(launch.permission_level),
         })
     }
 
@@ -405,6 +427,44 @@ impl ClaudeInteractiveSession {
             pty_tx: self.pty_tx.clone(),
             active_turn: self.active_turn.clone(),
         }
+    }
+
+    /// Cycle claude's TUI permission mode by writing `\x1b[Z` (Shift+Tab)
+    /// `N` times via the PTY writer, where `N` is the forward distance
+    /// from the current level to `target` in `PermissionLevel::CYCLE`.
+    /// Updates the local tracker so subsequent calls compute correctly.
+    pub async fn set_permission_level(
+        &self,
+        target: anatta_core::PermissionLevel,
+    ) -> Result<(), SpawnError> {
+        let n = {
+            let mut guard = self
+                .current_level
+                .lock()
+                .expect("permission_level mutex poisoned");
+            let n = shift_tab_count(*guard, target);
+            *guard = target;
+            n
+        };
+        if n == 0 {
+            return Ok(());
+        }
+        let mut bytes = Vec::with_capacity(n * 3);
+        for _ in 0..n {
+            bytes.extend_from_slice(b"\x1b[Z");
+        }
+        self.pty_tx
+            .send(PtyCommand::Write(bytes))
+            .await
+            .map_err(|_| SpawnError::Io(std::io::Error::other("pty writer task gone")))
+    }
+
+    /// Current tracked permission level.
+    pub fn permission_level(&self) -> anatta_core::PermissionLevel {
+        *self
+            .current_level
+            .lock()
+            .expect("permission_level mutex poisoned")
     }
 }
 
@@ -517,9 +577,24 @@ async fn persistent_tail_loop(
 /// claude needs to bypass the wizard; existing keys (credentials,
 /// theme already chosen by the user, etc.) are preserved.
 ///
-/// claude reads `hasCompletedOnboarding` from `<CLAUDE_CONFIG_DIR>/.claude.json`
-/// at startup; without it the TUI lands on a theme-selection screen that
-/// captures keystrokes before reaching the chat input.
+/// Pre-seed every `<CLAUDE_CONFIG_DIR>/.claude.json` marker we know
+/// suppresses a first-run TUI screen that would otherwise eat the
+/// first bracketed-paste prompt:
+///
+/// - `hasCompletedOnboarding` — skips the theme picker.
+/// - `theme` — fallback in case the picker still tries to run.
+/// - `lastReleaseNotesSeen` — claude shows a "What's new in {version}"
+///   panel at startup whenever this is below the running CLI version
+///   (or absent). The panel sits next to a welcome panel and they
+///   both capture keystrokes until dismissed. Setting a far-future
+///   sentinel makes the panel skip forever.
+/// - `autoPermissionsNotificationCount` + `hasResetAutoModeOptInForDefaultOffer`
+///   — skips the "Enable auto mode?" opt-in dialog that fires the
+///   first time `--permission-mode auto` is used in this profile.
+///
+/// Each marker is added independently if missing — the function runs
+/// every `open()` and is safe to re-run on profiles that already have
+/// some but not all markers (e.g. profiles seeded by an older anatta).
 async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError> {
     let claude_json = profile_dir.join(".claude.json");
     let mut config: serde_json::Value = match tokio::fs::read_to_string(&claude_json).await {
@@ -531,15 +606,52 @@ async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError
         Some(o) => o,
         None => return Ok(()), // .claude.json exists but isn't an object; leave alone
     };
-    if obj.contains_key("hasCompletedOnboarding") {
+
+    let mut changed = false;
+
+    if !obj.contains_key("hasCompletedOnboarding") {
+        obj.insert(
+            "hasCompletedOnboarding".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("theme") {
+        obj.insert(
+            "theme".to_string(),
+            serde_json::Value::String("dark".to_string()),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("lastReleaseNotesSeen") {
+        // Sentinel that's always >= claude's current version, so the
+        // "What's new in X" panel never fires for anatta-managed
+        // sessions regardless of which claude version is installed.
+        obj.insert(
+            "lastReleaseNotesSeen".to_string(),
+            serde_json::Value::String("999.999.999".to_string()),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("autoPermissionsNotificationCount") {
+        obj.insert(
+            "autoPermissionsNotificationCount".to_string(),
+            serde_json::Value::Number(1.into()),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("hasResetAutoModeOptInForDefaultOffer") {
+        obj.insert(
+            "hasResetAutoModeOptInForDefaultOffer".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        changed = true;
+    }
+
+    if !changed {
         return Ok(());
     }
-    obj.insert(
-        "hasCompletedOnboarding".to_string(),
-        serde_json::Value::Bool(true),
-    );
-    obj.entry("theme".to_string())
-        .or_insert_with(|| serde_json::Value::String("dark".to_string()));
+
     let pretty = serde_json::to_string_pretty(&config).map_err(|e| {
         SpawnError::Io(std::io::Error::other(format!("serialize claude.json: {e}")))
     })?;
@@ -804,6 +916,55 @@ impl ClaudeInteractiveSession {
         );
 
         Ok(InteractiveTurnHandle { events_rx })
+    }
+}
+
+#[cfg(test)]
+mod tests_perm {
+    use super::shift_tab_count;
+    use anatta_core::PermissionLevel;
+
+    #[test]
+    fn shift_tab_count_zero_when_same() {
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::Default),
+            0
+        );
+    }
+
+    #[test]
+    fn shift_tab_count_steps_forward_in_cycle() {
+        // CYCLE = [Default, AcceptEdits, Auto, BypassAll, Plan]
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::AcceptEdits),
+            1
+        );
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::Auto),
+            2
+        );
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::BypassAll),
+            3
+        );
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::Plan),
+            4
+        );
+    }
+
+    #[test]
+    fn shift_tab_count_wraps_backwards_via_forward_steps() {
+        // Plan → Default is 1 forward step (wraps).
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Plan, PermissionLevel::Default),
+            1
+        );
+        // BypassAll → AcceptEdits = forward through Plan, Default, AcceptEdits = 3.
+        assert_eq!(
+            shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::AcceptEdits),
+            3
+        );
     }
 }
 

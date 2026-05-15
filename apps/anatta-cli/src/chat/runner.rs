@@ -191,10 +191,40 @@ async fn run_chat(
     }
 
     let result: Result<(), ChatError> = loop {
-        renderer.pre_prompt();
+        let cur_level = session.permission_level().await;
+        renderer.pre_prompt(cur_level);
         match input.read_prompt() {
             ReadOutcome::Eof | ReadOutcome::Interrupted => {
                 break Err(ChatError::InputClosed);
+            }
+            ReadOutcome::CyclePermission => {
+                let new_level = cur_level.next();
+                // Codex reopen needs a launch template; rebuild from the
+                // stored profile + current cwd. For non-codex backends,
+                // None is fine.
+                let codex_template = match profile.backend {
+                    anatta_store::profile::BackendKind::Codex => {
+                        match launch::build_launch(
+                            &profile,
+                            cwd.clone(),
+                            backend_session_id.clone(),
+                            cfg,
+                        ) {
+                            Ok(anatta_runtime::spawn::BackendLaunch::Codex(l)) => Some(l),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Err(e) = session
+                    .set_permission_level(new_level, codex_template)
+                    .await
+                {
+                    eprintln!("✗ permission swap failed: {e}");
+                    continue;
+                }
+                renderer.permission_changed(new_level);
+                continue;
             }
             ReadOutcome::Line(s) if s.is_empty() => continue,
             ReadOutcome::Line(s) if s.starts_with('/') => {

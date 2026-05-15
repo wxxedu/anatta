@@ -22,6 +22,7 @@ use dialoguer::theme::ColorfulTheme;
 use crate::config::Config;
 
 mod input;
+mod permission_hotkey;
 mod render;
 mod runner;
 mod slash;

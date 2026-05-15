@@ -533,10 +533,15 @@ impl EventRenderer for LineRenderer {
         self.commit_delta();
     }
 
-    fn pre_prompt(&mut self) {
+    fn pre_prompt(&mut self, level: anatta_core::PermissionLevel) {
         if let Some(s) = self.render_rate_limit_status_line() {
             self.print(&s);
         }
+        println!("⏵⏵ {}  ·  shift+tab to cycle", level.label());
+    }
+
+    fn permission_changed(&mut self, level: anatta_core::PermissionLevel) {
+        println!("⏵⏵ permission level: {}", level.label());
     }
 
     fn on_chat_end(&mut self) {

@@ -61,6 +61,7 @@ async fn launch_extracts_session_id_from_first_init_event() {
         resume: None,
         binary_path: mock_bin,
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let mut session = launch.launch().await.expect("launch");
@@ -118,6 +119,7 @@ async fn launch_fails_when_binary_missing() {
         resume: None,
         binary_path: tmp.path().join("does-not-exist"),
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let err = launch.launch().await.expect_err("should fail");
@@ -142,6 +144,7 @@ async fn launch_fails_when_child_exits_without_emitting() {
         resume: None,
         binary_path: mock_bin,
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let err = launch
@@ -177,6 +180,7 @@ async fn cancel_drops_stdin_and_returns_exit_info() {
         resume: None,
         binary_path: path,
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let session = launch.launch().await.expect("launch");
@@ -234,6 +238,7 @@ printf '%s\n' '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"sess
         resume: None,
         binary_path: script_path,
         provider: Some(provider),
+        permission_level: anatta_core::PermissionLevel::Default,
     }
     .launch()
     .await
@@ -278,6 +283,7 @@ printf '%s\n' '{"type":"system","subtype":"init","cwd":"/tmp","session_id":"sess
         resume: None,
         binary_path: script_path,
         provider: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     }
     .launch()
     .await

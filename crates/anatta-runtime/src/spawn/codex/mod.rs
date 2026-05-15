@@ -52,16 +52,6 @@ mod pump;
 pub use launch::CodexLaunch;
 pub use persistent::{CodexInterruptHandle, PersistentCodexSession, TurnHandle};
 
-/// Codex `approval_policy` value passed in `turn/start` requests and in
-/// the on-disk `turn_context.payload`. Anatta orchestrates approvals
-/// itself; codex must not prompt.
-const APPROVAL_POLICY: &str = "never";
-
-/// Codex `sandbox` policy passed to `thread/start.sandbox`. Anatta runs
-/// in user-controlled worktrees and supplies its own filesystem
-/// isolation, so codex's sandbox is disabled.
-const SANDBOX_POLICY: &str = "danger-full-access";
-
 /// JSON-RPC request id used for the first `turn/start` of a session.
 /// One-shot launches use this once; persistent sessions allocate ids
 /// monotonically from here.

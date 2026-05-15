@@ -26,8 +26,12 @@ pub(crate) trait EventRenderer {
     /// Called right before the chat loop reads the next prompt. Lets
     /// renderers print a sticky status line (rate-limit summary, etc.)
     /// above the `>` prompt without cluttering the inline transcript
-    /// while a turn is streaming.
-    fn pre_prompt(&mut self);
+    /// while a turn is streaming. Also prints the current permission level.
+    fn pre_prompt(&mut self, level: anatta_core::PermissionLevel);
+
+    /// Called when the user has just cycled to a new permission level.
+    /// Prints a confirmation line.
+    fn permission_changed(&mut self, level: anatta_core::PermissionLevel);
 
     /// Called once before the chat loop returns. Last chance to flush
     /// state, render a goodbye line, etc.

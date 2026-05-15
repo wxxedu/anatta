@@ -30,6 +30,10 @@ pub struct ClaudeLaunch {
     /// MODEL / vendor extras into the child. `None` = use claude-cli's own
     /// auth + endpoint (OAuth keychain path).
     pub provider: Option<crate::profile::ProviderEnv>,
+    /// Initial permission level. Mapped to `--permission-mode <value>`
+    /// at spawn. The per-turn shape re-spawns claude on every turn, so
+    /// updating this between turns takes effect on the next turn.
+    pub permission_level: anatta_core::PermissionLevel,
 }
 
 #[async_trait]
@@ -55,10 +59,13 @@ impl Launchable for ClaudeLaunch {
             .arg("stream-json")
             .arg("--verbose")
             .arg("--include-partial-messages")
-            // anatta orchestrates the conversation lifecycle (segment locking,
-            // workspace, etc.); claude's interactive permission prompts are
-            // never visible in `--print` mode and stall the turn. Bypass them.
-            .arg("--dangerously-skip-permissions");
+            // anatta orchestrates the conversation lifecycle; claude's
+            // interactive permission prompts are never visible in
+            // `--print` mode and would stall the turn. We pass the
+            // current PermissionLevel as the explicit mode so the
+            // backend behaves consistently with the interactive shape.
+            .arg("--permission-mode")
+            .arg(self.permission_level.claude_arg());
         if let Some(id) = &self.resume {
             cmd.arg("--resume").arg(id.as_str());
         }
