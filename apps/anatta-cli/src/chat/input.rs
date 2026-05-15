@@ -4,17 +4,21 @@
 //!   * persists history under `<anatta_home>/chat_history`
 //!   * maps Ctrl-D (Eof) and Ctrl-C (Interrupted) to dedicated outcomes
 //!     the chat loop reads to drive exit semantics
+//!   * binds Shift+Tab to surface `CyclePermission` so the chat loop can
+//!     advance the active permission level
 
 use std::path::PathBuf;
 
-use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use rustyline::{DefaultEditor, EventHandler, KeyCode, KeyEvent, Modifiers};
 
 use super::ChatError;
+use super::permission_hotkey::CyclePermissionFlag;
 
 pub(crate) struct InputReader {
     editor: DefaultEditor,
     history_path: PathBuf,
+    cycle_flag: CyclePermissionFlag,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,23 +28,35 @@ pub(crate) enum ReadOutcome {
     Eof,
     /// Ctrl-C at the prompt (not during a turn) → also exit.
     Interrupted,
+    /// User pressed Shift+Tab — cycle to the next permission level.
+    CyclePermission,
 }
 
 impl InputReader {
     pub(crate) fn new(anatta_home: &std::path::Path) -> Result<Self, ChatError> {
         let mut editor = DefaultEditor::new().map_err(|e| ChatError::Readline(e.to_string()))?;
+        let cycle_flag = CyclePermissionFlag::new();
+        editor.bind_sequence(
+            KeyEvent(KeyCode::BackTab, Modifiers::NONE),
+            EventHandler::Conditional(Box::new(cycle_flag.handler())),
+        );
         let history_path = anatta_home.join("chat_history");
         // Best-effort load; first-run is fine.
         let _ = editor.load_history(&history_path);
         Ok(Self {
             editor,
             history_path,
+            cycle_flag,
         })
     }
 
     pub(crate) fn read_prompt(&mut self) -> ReadOutcome {
         match self.editor.readline("> ") {
             Ok(line) => {
+                // Shift+Tab consumed the line — surface the cycle event.
+                if self.cycle_flag.take() {
+                    return ReadOutcome::CyclePermission;
+                }
                 let trimmed = line.trim().to_owned();
                 if !trimmed.is_empty() {
                     let _ = self.editor.add_history_entry(&trimmed);

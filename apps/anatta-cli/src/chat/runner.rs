@@ -196,6 +196,8 @@ async fn run_chat(
             ReadOutcome::Eof | ReadOutcome::Interrupted => {
                 break Err(ChatError::InputClosed);
             }
+            // TODO(task-12): implement permission-level cycling UI
+            ReadOutcome::CyclePermission => continue,
             ReadOutcome::Line(s) if s.is_empty() => continue,
             ReadOutcome::Line(s) if s.starts_with('/') => {
                 match slash::handle(&s, &profile, cfg).await {

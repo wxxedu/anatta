@@ -29,7 +29,7 @@ ulid        = { workspace = true }
 # chat-specific
 crossterm      = "0.29"
 termimad       = "0.31"
-rustyline      = { version = "15", default-features = false, features = ["with-file-history"] }
+rustyline      = { version = "15", default-features = false, features = ["with-file-history", "custom-bindings"] }
 unicode-width  = "0.2"
 
 [dev-dependencies]
