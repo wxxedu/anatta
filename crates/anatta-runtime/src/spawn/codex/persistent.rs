@@ -265,11 +265,11 @@ impl PersistentCodexSession {
 
     /// Currently active permission level.
     pub async fn current_level(&self) -> anatta_core::PermissionLevel {
-        // Re-derive from `current_policy` by reverse-mapping. Cheap; only
-        // 5 levels. Avoids storing the level twice (policy is the
-        // authoritative state).
+        // Re-derive from `current_policy` by reverse-mapping over all 5
+        // variants — CYCLE excludes Plan, but a session can still be
+        // pinned to Plan via the initial launch level.
         let policy = *self.current_policy.lock().await;
-        for level in anatta_core::PermissionLevel::CYCLE {
+        for level in anatta_core::PermissionLevel::ALL {
             if level.codex_policy() == policy {
                 return level;
             }

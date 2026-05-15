@@ -159,7 +159,10 @@ fn build_claude_interactive(
         provider,
         model: record.model_override.clone(),
         bare,
-        permission_level: anatta_core::PermissionLevel::AcceptEdits,
+        // Launch in `bypassPermissions` so Shift+Tab exposes claude's
+        // full 4-mode rotation (BypassAll → Default → AcceptEdits →
+        // Auto). Other initial modes give a truncated rotation.
+        permission_level: anatta_core::PermissionLevel::BypassAll,
     })
 }
 

@@ -59,14 +59,22 @@ pub fn encode_prompt_for_test(prompt: &str) -> Vec<u8> {
 /// Number of Shift+Tab keystrokes required to advance claude's
 /// internal permission-mode cursor from `from` to `to`, given that
 /// each Shift+Tab moves one slot forward in `PermissionLevel::CYCLE`.
+///
+/// If `from` is outside the cycle (only `Plan` qualifies), one Shift+Tab
+/// snaps it into the cycle's first slot before the normal distance is
+/// computed.
 pub(crate) fn shift_tab_count(
     from: anatta_core::PermissionLevel,
     to: anatta_core::PermissionLevel,
 ) -> usize {
     let cycle = anatta_core::PermissionLevel::CYCLE;
-    let f = cycle.iter().position(|&l| l == from).unwrap_or(0);
     let t = cycle.iter().position(|&l| l == to).unwrap_or(0);
-    (t + cycle.len() - f) % cycle.len()
+    match cycle.iter().position(|&l| l == from) {
+        Some(f) => (t + cycle.len() - f) % cycle.len(),
+        // `from` is outside the cycle (Plan): one keystroke lands at
+        // cycle[0], then `t` more keystrokes reach the target.
+        None => 1 + t,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -934,35 +942,31 @@ mod tests_perm {
 
     #[test]
     fn shift_tab_count_steps_forward_in_cycle() {
-        // CYCLE = [Default, AcceptEdits, Auto, BypassAll, Plan]
+        // CYCLE = [BypassAll, Default, AcceptEdits, Auto]
         assert_eq!(
-            shift_tab_count(PermissionLevel::Default, PermissionLevel::AcceptEdits),
+            shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::Default),
             1
         );
         assert_eq!(
-            shift_tab_count(PermissionLevel::Default, PermissionLevel::Auto),
+            shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::AcceptEdits),
             2
         );
         assert_eq!(
-            shift_tab_count(PermissionLevel::Default, PermissionLevel::BypassAll),
+            shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::Auto),
             3
-        );
-        assert_eq!(
-            shift_tab_count(PermissionLevel::Default, PermissionLevel::Plan),
-            4
         );
     }
 
     #[test]
-    fn shift_tab_count_wraps_backwards_via_forward_steps() {
-        // Plan → Default is 1 forward step (wraps).
+    fn shift_tab_count_wraps_back_to_bypass_all() {
+        // Auto → BypassAll is 1 forward step (wraps).
         assert_eq!(
-            shift_tab_count(PermissionLevel::Plan, PermissionLevel::Default),
+            shift_tab_count(PermissionLevel::Auto, PermissionLevel::BypassAll),
             1
         );
-        // BypassAll → AcceptEdits = forward through Plan, Default, AcceptEdits = 3.
+        // AcceptEdits → Default = forward through Auto, BypassAll, Default = 3.
         assert_eq!(
-            shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::AcceptEdits),
+            shift_tab_count(PermissionLevel::AcceptEdits, PermissionLevel::Default),
             3
         );
     }
