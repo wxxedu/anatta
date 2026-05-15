@@ -185,26 +185,26 @@ mod tests {
         let p = PermissionLevel::Default.codex_policy();
         assert_eq!(p.approval, "on-request");
         assert_eq!(p.sandbox, "workspace-write");
-        assert_eq!(p.reviewer_armed, false);
+        assert!(!p.reviewer_armed);
 
         let p = PermissionLevel::AcceptEdits.codex_policy();
         assert_eq!(p.approval, "never");
         assert_eq!(p.sandbox, "workspace-write");
-        assert_eq!(p.reviewer_armed, false);
+        assert!(!p.reviewer_armed);
 
         let p = PermissionLevel::Auto.codex_policy();
         assert_eq!(p.approval, "on-request");
         assert_eq!(p.sandbox, "workspace-write");
-        assert_eq!(p.reviewer_armed, true);
+        assert!(p.reviewer_armed);
 
         let p = PermissionLevel::BypassAll.codex_policy();
         assert_eq!(p.approval, "never");
         assert_eq!(p.sandbox, "danger-full-access");
-        assert_eq!(p.reviewer_armed, false);
+        assert!(!p.reviewer_armed);
 
         let p = PermissionLevel::Plan.codex_policy();
         assert_eq!(p.approval, "on-request");
         assert_eq!(p.sandbox, "read-only");
-        assert_eq!(p.reviewer_armed, false);
+        assert!(!p.reviewer_armed);
     }
 }
