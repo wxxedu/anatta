@@ -282,6 +282,21 @@ impl ClaudeInteractiveSession {
             }
         }
         cmd.cwd(launch.cwd.as_os_str());
+        // `dontAsk` is the only mode that:
+        //   1. Skips the `bypassPermissions` startup confirmation dialog
+        //      (which `--dangerously-skip-permissions` / `--permission-mode
+        //      bypassPermissions` both show in interactive mode and which
+        //      eats the first bracketed-paste prompt).
+        //   2. Hard-denies interactive tools like `AskUserQuestion` with a
+        //      structured error claude knows to recover from, rather than
+        //      letting them invoke and hang against anatta's sunk PTY.
+        //
+        // The trade-off: any tool that *requires* user input from inside
+        // a session cannot work until anatta grows a tool-result round-trip
+        // (render the question to its own REPL, capture an answer, ship
+        // it back as a `tool_result` event). Claude code's denial message
+        // explicitly suggests fallback tools, so this is graceful, not
+        // fatal.
         cmd.arg("--permission-mode");
         cmd.arg("dontAsk");
         if launch.bare {
