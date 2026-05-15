@@ -1,6 +1,7 @@
 //! Claude `--print --output-format stream-json` launch.
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 use anatta_core::{AgentEvent, ProjectionContext, Projector};
 use async_trait::async_trait;
@@ -46,6 +47,10 @@ impl Launchable for ClaudeLaunch {
             return Err(SpawnError::ProfilePathInvalid(self.profile.path.clone()));
         }
 
+        if self.permission_level == anatta_core::PermissionLevel::BypassAll {
+            ensure_skip_dangerous_mode_permission_prompt(&self.profile.path).await?;
+        }
+
         let mut cmd = Command::new(&self.binary_path);
         cmd.env("CLAUDE_CONFIG_DIR", &self.profile.path);
         if let Some(env) = &self.provider {
@@ -88,5 +93,97 @@ impl Launchable for ClaudeLaunch {
         let handles: PipelineHandles = spawn_with_pipeline(cmd, line_to_events).await?;
 
         super::finalize_first_event_session(handles).await
+    }
+}
+
+/// Pre-seed Claude's current bypass-permissions acknowledgment marker.
+///
+/// Claude 2.1.x shows a blocking TUI safety dialog before enabling
+/// `bypassPermissions` unless `<CLAUDE_CONFIG_DIR>/settings.json` contains
+/// this key. Anatta cannot answer that dialog through the discarded PTY, so
+/// bypass-mode launches must make the profile explicit up front.
+pub(crate) async fn ensure_skip_dangerous_mode_permission_prompt(
+    profile_dir: &Path,
+) -> Result<(), SpawnError> {
+    let settings_json = profile_dir.join("settings.json");
+    let mut settings: serde_json::Value = match tokio::fs::read_to_string(&settings_json).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({})),
+        Err(e) if e.kind() == ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(SpawnError::Io(e)),
+    };
+    let Some(obj) = settings.as_object_mut() else {
+        return Ok(());
+    };
+
+    if obj
+        .get("skipDangerousModePermissionPrompt")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Ok(());
+    }
+
+    obj.insert(
+        "skipDangerousModePermissionPrompt".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    let pretty = serde_json::to_string_pretty(&settings).map_err(|e| {
+        SpawnError::Io(std::io::Error::other(format!(
+            "serialize claude settings: {e}"
+        )))
+    })?;
+    tokio::fs::write(settings_json, pretty)
+        .await
+        .map_err(SpawnError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ensure_skip_dangerous_mode_permission_prompt_creates_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        ensure_skip_dangerous_mode_permission_prompt(tmp.path())
+            .await
+            .unwrap();
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings
+                .get("skipDangerousModePermissionPrompt")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_skip_dangerous_mode_permission_prompt_preserves_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"permissions":{"defaultMode":"auto"}}"#,
+        )
+        .unwrap();
+
+        ensure_skip_dangerous_mode_permission_prompt(tmp.path())
+            .await
+            .unwrap();
+
+        let settings: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settings["permissions"]["defaultMode"], "auto");
+        assert_eq!(
+            settings
+                .get("skipDangerousModePermissionPrompt")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
     }
 }

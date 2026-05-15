@@ -25,6 +25,7 @@ use crate::claude::HistoryProjector;
 use crate::claude::history::ClaudeEvent;
 use crate::conversation::paths::{encode_cwd, working_jsonl_path};
 use crate::profile::ClaudeProfile;
+use crate::spawn::claude::ensure_skip_dangerous_mode_permission_prompt;
 use crate::spawn::stderr_buf;
 use crate::spawn::{ClaudeSessionId, ExitInfo, SpawnError};
 
@@ -37,6 +38,21 @@ const STARTUP_SLEEP: Duration = Duration::from_millis(500);
 const SESSION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 const SESSION_DISCOVERY_INTERVAL: Duration = Duration::from_millis(200);
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
+
+/// Set `ANATTA_DEBUG_CLAUDE_STARTUP=1` to dump per-step diagnostics
+/// (argv, PTY drain bytes, JSONL discovery polls) to stderr. Off by
+/// default to avoid noise in normal use.
+fn debug_startup_enabled() -> bool {
+    std::env::var_os("ANATTA_DEBUG_CLAUDE_STARTUP").is_some_and(|v| v != "0" && !v.is_empty())
+}
+
+macro_rules! debug_startup {
+    ($($arg:tt)*) => {
+        if $crate::spawn::claude_interactive::debug_startup_enabled() {
+            eprintln!("[anatta:claude-startup] {}", format_args!($($arg)*));
+        }
+    };
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Prompt encoding
@@ -275,6 +291,12 @@ impl ClaudeInteractiveSession {
         }
 
         ensure_onboarding_complete(&launch.profile.path).await?;
+        ensure_skip_dangerous_mode_permission_prompt(&launch.profile.path).await?;
+        debug_startup!(
+            "seeded claude startup markers at {} and {}",
+            launch.profile.path.join(".claude.json").display(),
+            launch.profile.path.join("settings.json").display()
+        );
 
         let cwd_str = launch
             .cwd
@@ -282,7 +304,13 @@ impl ClaudeInteractiveSession {
             .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
         let project_jsonl_dir = project_jsonl_dir(&launch.profile.path, cwd_str);
         let pre_spawn_jsonls = if launch.resume.is_none() {
-            Some(snapshot_jsonl_stems(&project_jsonl_dir).await?)
+            let snapshot = snapshot_jsonl_stems(&project_jsonl_dir).await?;
+            debug_startup!(
+                "pre-spawn JSONL snapshot at {}: {} file(s)",
+                project_jsonl_dir.display(),
+                snapshot.len()
+            );
+            Some(snapshot)
         } else {
             None
         };
@@ -325,11 +353,29 @@ impl ClaudeInteractiveSession {
             cmd.arg(resume.as_str());
         }
 
+        debug_startup!(
+            "spawning {} --permission-mode {}{}{}{}",
+            launch.binary_path.display(),
+            launch.permission_level.claude_arg(),
+            if launch.bare { " --bare" } else { "" },
+            launch
+                .model
+                .as_deref()
+                .map(|m| format!(" --model {m}"))
+                .unwrap_or_default(),
+            launch
+                .resume
+                .as_ref()
+                .map(|r| format!(" --resume {}", r.as_str()))
+                .unwrap_or_default(),
+        );
+
         let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| SpawnError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
         drop(pair.slave);
+        debug_startup!("claude process spawned, pid={:?}", child.process_id());
 
         let mut reader = pair
             .master
@@ -343,10 +389,47 @@ impl ClaudeInteractiveSession {
         // Drain thread: must read continuously or the kernel PTY buffer
         // fills, claude blocks on its next write, and the JSONL stops
         // being appended.
+        //
+        // In debug mode, capture the first 32 KiB so we can see startup
+        // banners / dialogs that might be blocking the session JSONL.
+        let debug = debug_startup_enabled();
         std::thread::Builder::new()
             .name("claude-pty-drain".into())
             .spawn(move || {
-                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                if debug {
+                    use std::io::Read;
+                    let mut head = Vec::with_capacity(32 * 1024);
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if head.len() < 32 * 1024 {
+                                    let take = (32 * 1024 - head.len()).min(n);
+                                    head.extend_from_slice(&buf[..take]);
+                                    if head.len() >= 32 * 1024 {
+                                        let printable = String::from_utf8_lossy(&head);
+                                        eprintln!(
+                                            "[anatta:claude-startup] PTY first 32K (escaped):\n{:?}",
+                                            printable.as_ref()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if !head.is_empty() && head.len() < 32 * 1024 {
+                        let printable = String::from_utf8_lossy(&head);
+                        eprintln!(
+                            "[anatta:claude-startup] PTY drained {} bytes (escaped):\n{:?}",
+                            head.len(),
+                            printable.as_ref()
+                        );
+                    }
+                } else {
+                    let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                }
             })
             .map_err(SpawnError::Io)?;
 
@@ -599,6 +682,11 @@ async fn persistent_tail_loop(
 /// - `autoPermissionsNotificationCount` + `hasResetAutoModeOptInForDefaultOffer`
 ///   — skips the "Enable auto mode?" opt-in dialog that fires the
 ///   first time `--permission-mode auto` is used in this profile.
+/// - `bypassPermissionsModeAccepted` — legacy bypass disclaimer marker.
+///   Current claude releases use `settings.json` key
+///   `skipDangerousModePermissionPrompt`; that is seeded separately by
+///   [`ensure_skip_dangerous_mode_permission_prompt`]. Without that key,
+///   claude blocks on the dialog and never creates the session JSONL we tail.
 ///
 /// Each marker is added independently if missing — the function runs
 /// every `open()` and is safe to re-run on profiles that already have
@@ -655,6 +743,13 @@ async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError
         );
         changed = true;
     }
+    if !obj.contains_key("bypassPermissionsModeAccepted") {
+        obj.insert(
+            "bypassPermissionsModeAccepted".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        changed = true;
+    }
 
     if !changed {
         return Ok(());
@@ -700,15 +795,31 @@ async fn discover_new_session_id(
     pre_spawn_jsonls: &HashSet<String>,
 ) -> Result<ClaudeSessionId, SpawnError> {
     let started = Instant::now();
+    let mut last_seen_total: Option<usize> = None;
     loop {
         let current = snapshot_jsonl_stems(dir).await?;
+        if debug_startup_enabled() && last_seen_total != Some(current.len()) {
+            debug_startup!(
+                "discovery poll at {:.1}s: dir has {} jsonl(s), {} new",
+                started.elapsed().as_secs_f32(),
+                current.len(),
+                current.difference(pre_spawn_jsonls).count(),
+            );
+            last_seen_total = Some(current.len());
+        }
         let mut new_stems: Vec<String> = current
             .difference(pre_spawn_jsonls)
             .map(ToOwned::to_owned)
             .collect();
         if !new_stems.is_empty() {
             new_stems.sort();
-            return Ok(ClaudeSessionId::new(new_stems.remove(0)));
+            let picked = new_stems.remove(0);
+            debug_startup!(
+                "discovered new session JSONL stem: {} after {:.1}s",
+                picked,
+                started.elapsed().as_secs_f32()
+            );
+            return Ok(ClaudeSessionId::new(picked));
         }
         if started.elapsed() >= SESSION_DISCOVERY_TIMEOUT {
             return Err(SpawnError::Io(std::io::Error::new(
