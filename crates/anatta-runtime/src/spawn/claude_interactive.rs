@@ -577,9 +577,24 @@ async fn persistent_tail_loop(
 /// claude needs to bypass the wizard; existing keys (credentials,
 /// theme already chosen by the user, etc.) are preserved.
 ///
-/// claude reads `hasCompletedOnboarding` from `<CLAUDE_CONFIG_DIR>/.claude.json`
-/// at startup; without it the TUI lands on a theme-selection screen that
-/// captures keystrokes before reaching the chat input.
+/// Pre-seed every `<CLAUDE_CONFIG_DIR>/.claude.json` marker we know
+/// suppresses a first-run TUI screen that would otherwise eat the
+/// first bracketed-paste prompt:
+///
+/// - `hasCompletedOnboarding` — skips the theme picker.
+/// - `theme` — fallback in case the picker still tries to run.
+/// - `lastReleaseNotesSeen` — claude shows a "What's new in {version}"
+///   panel at startup whenever this is below the running CLI version
+///   (or absent). The panel sits next to a welcome panel and they
+///   both capture keystrokes until dismissed. Setting a far-future
+///   sentinel makes the panel skip forever.
+/// - `autoPermissionsNotificationCount` + `hasResetAutoModeOptInForDefaultOffer`
+///   — skips the "Enable auto mode?" opt-in dialog that fires the
+///   first time `--permission-mode auto` is used in this profile.
+///
+/// Each marker is added independently if missing — the function runs
+/// every `open()` and is safe to re-run on profiles that already have
+/// some but not all markers (e.g. profiles seeded by an older anatta).
 async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError> {
     let claude_json = profile_dir.join(".claude.json");
     let mut config: serde_json::Value = match tokio::fs::read_to_string(&claude_json).await {
@@ -591,15 +606,52 @@ async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError
         Some(o) => o,
         None => return Ok(()), // .claude.json exists but isn't an object; leave alone
     };
-    if obj.contains_key("hasCompletedOnboarding") {
+
+    let mut changed = false;
+
+    if !obj.contains_key("hasCompletedOnboarding") {
+        obj.insert(
+            "hasCompletedOnboarding".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("theme") {
+        obj.insert(
+            "theme".to_string(),
+            serde_json::Value::String("dark".to_string()),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("lastReleaseNotesSeen") {
+        // Sentinel that's always >= claude's current version, so the
+        // "What's new in X" panel never fires for anatta-managed
+        // sessions regardless of which claude version is installed.
+        obj.insert(
+            "lastReleaseNotesSeen".to_string(),
+            serde_json::Value::String("999.999.999".to_string()),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("autoPermissionsNotificationCount") {
+        obj.insert(
+            "autoPermissionsNotificationCount".to_string(),
+            serde_json::Value::Number(1.into()),
+        );
+        changed = true;
+    }
+    if !obj.contains_key("hasResetAutoModeOptInForDefaultOffer") {
+        obj.insert(
+            "hasResetAutoModeOptInForDefaultOffer".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        changed = true;
+    }
+
+    if !changed {
         return Ok(());
     }
-    obj.insert(
-        "hasCompletedOnboarding".to_string(),
-        serde_json::Value::Bool(true),
-    );
-    obj.entry("theme".to_string())
-        .or_insert_with(|| serde_json::Value::String("dark".to_string()));
+
     let pretty = serde_json::to_string_pretty(&config).map_err(|e| {
         SpawnError::Io(std::io::Error::other(format!("serialize claude.json: {e}")))
     })?;
@@ -874,24 +926,45 @@ mod tests_perm {
 
     #[test]
     fn shift_tab_count_zero_when_same() {
-        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::Default), 0);
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::Default),
+            0
+        );
     }
 
     #[test]
     fn shift_tab_count_steps_forward_in_cycle() {
         // CYCLE = [Default, AcceptEdits, Auto, BypassAll, Plan]
-        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::AcceptEdits), 1);
-        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::Auto), 2);
-        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::BypassAll), 3);
-        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::Plan), 4);
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::AcceptEdits),
+            1
+        );
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::Auto),
+            2
+        );
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::BypassAll),
+            3
+        );
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Default, PermissionLevel::Plan),
+            4
+        );
     }
 
     #[test]
     fn shift_tab_count_wraps_backwards_via_forward_steps() {
         // Plan → Default is 1 forward step (wraps).
-        assert_eq!(shift_tab_count(PermissionLevel::Plan, PermissionLevel::Default), 1);
+        assert_eq!(
+            shift_tab_count(PermissionLevel::Plan, PermissionLevel::Default),
+            1
+        );
         // BypassAll → AcceptEdits = forward through Plan, Default, AcceptEdits = 3.
-        assert_eq!(shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::AcceptEdits), 3);
+        assert_eq!(
+            shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::AcceptEdits),
+            3
+        );
     }
 }
 
