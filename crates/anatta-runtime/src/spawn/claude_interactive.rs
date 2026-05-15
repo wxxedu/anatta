@@ -56,6 +56,19 @@ pub fn encode_prompt_for_test(prompt: &str) -> Vec<u8> {
     encode_prompt(prompt)
 }
 
+/// Number of Shift+Tab keystrokes required to advance claude's
+/// internal permission-mode cursor from `from` to `to`, given that
+/// each Shift+Tab moves one slot forward in `PermissionLevel::CYCLE`.
+pub(crate) fn shift_tab_count(
+    from: anatta_core::PermissionLevel,
+    to: anatta_core::PermissionLevel,
+) -> usize {
+    let cycle = anatta_core::PermissionLevel::CYCLE;
+    let f = cycle.iter().position(|&l| l == from).unwrap_or(0);
+    let t = cycle.iter().position(|&l| l == to).unwrap_or(0);
+    (t + cycle.len() - f) % cycle.len()
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // JSONL tail
 // ──────────────────────────────────────────────────────────────────────
@@ -414,6 +427,44 @@ impl ClaudeInteractiveSession {
             pty_tx: self.pty_tx.clone(),
             active_turn: self.active_turn.clone(),
         }
+    }
+
+    /// Cycle claude's TUI permission mode by writing `\x1b[Z` (Shift+Tab)
+    /// `N` times via the PTY writer, where `N` is the forward distance
+    /// from the current level to `target` in `PermissionLevel::CYCLE`.
+    /// Updates the local tracker so subsequent calls compute correctly.
+    pub async fn set_permission_level(
+        &self,
+        target: anatta_core::PermissionLevel,
+    ) -> Result<(), SpawnError> {
+        let n = {
+            let mut guard = self
+                .current_level
+                .lock()
+                .expect("permission_level mutex poisoned");
+            let n = shift_tab_count(*guard, target);
+            *guard = target;
+            n
+        };
+        if n == 0 {
+            return Ok(());
+        }
+        let mut bytes = Vec::with_capacity(n * 3);
+        for _ in 0..n {
+            bytes.extend_from_slice(b"\x1b[Z");
+        }
+        self.pty_tx
+            .send(PtyCommand::Write(bytes))
+            .await
+            .map_err(|_| SpawnError::Io(std::io::Error::other("pty writer task gone")))
+    }
+
+    /// Current tracked permission level.
+    pub fn permission_level(&self) -> anatta_core::PermissionLevel {
+        *self
+            .current_level
+            .lock()
+            .expect("permission_level mutex poisoned")
     }
 }
 
@@ -813,6 +864,34 @@ impl ClaudeInteractiveSession {
         );
 
         Ok(InteractiveTurnHandle { events_rx })
+    }
+}
+
+#[cfg(test)]
+mod tests_perm {
+    use super::shift_tab_count;
+    use anatta_core::PermissionLevel;
+
+    #[test]
+    fn shift_tab_count_zero_when_same() {
+        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::Default), 0);
+    }
+
+    #[test]
+    fn shift_tab_count_steps_forward_in_cycle() {
+        // CYCLE = [Default, AcceptEdits, Auto, BypassAll, Plan]
+        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::AcceptEdits), 1);
+        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::Auto), 2);
+        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::BypassAll), 3);
+        assert_eq!(shift_tab_count(PermissionLevel::Default, PermissionLevel::Plan), 4);
+    }
+
+    #[test]
+    fn shift_tab_count_wraps_backwards_via_forward_steps() {
+        // Plan → Default is 1 forward step (wraps).
+        assert_eq!(shift_tab_count(PermissionLevel::Plan, PermissionLevel::Default), 1);
+        // BypassAll → AcceptEdits = forward through Plan, Default, AcceptEdits = 3.
+        assert_eq!(shift_tab_count(PermissionLevel::BypassAll, PermissionLevel::AcceptEdits), 3);
     }
 }
 
