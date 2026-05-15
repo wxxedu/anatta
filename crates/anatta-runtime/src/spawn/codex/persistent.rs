@@ -26,10 +26,10 @@ use crate::codex::app_server::AppServerProjector;
 use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
 use crate::spawn::{CodexThreadId, ExitInfo, SpawnError, stderr_buf};
 
+use super::FIRST_TURN_REQUEST_ID;
 use super::handshake::{Handshake, handshake};
 use super::launch::CodexLaunch;
 use super::pump::{persistent_reader_loop, push_synthetic_session_started, write_request};
-use super::FIRST_TURN_REQUEST_ID;
 
 pub struct PersistentCodexSession {
     child: Child,
@@ -296,8 +296,8 @@ impl PersistentCodexSession {
         if cur == new_policy {
             return Ok(());
         }
-        let needs_reopen = cur.reviewer_armed != new_policy.reviewer_armed
-            || cur.sandbox != new_policy.sandbox;
+        let needs_reopen =
+            cur.reviewer_armed != new_policy.reviewer_armed || cur.sandbox != new_policy.sandbox;
 
         if !needs_reopen {
             *self.current_policy.lock().await = new_policy;

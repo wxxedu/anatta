@@ -216,7 +216,10 @@ async fn run_chat(
                     }
                     _ => None,
                 };
-                if let Err(e) = session.set_permission_level(new_level, codex_template).await {
+                if let Err(e) = session
+                    .set_permission_level(new_level, codex_template)
+                    .await
+                {
                     eprintln!("✗ permission swap failed: {e}");
                     continue;
                 }

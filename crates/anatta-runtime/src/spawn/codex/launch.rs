@@ -24,9 +24,9 @@ use crate::codex::app_server::wire::{TurnInput, TurnStartParams};
 use crate::profile::CodexProfile;
 use crate::spawn::{AgentSession, CodexThreadId, Launchable, SpawnError};
 
+use super::FIRST_TURN_REQUEST_ID;
 use super::handshake::{Handshake, handshake};
 use super::pump::{make_error_event, push_synthetic_session_started, run_pump, write_request};
-use super::FIRST_TURN_REQUEST_ID;
 
 /// Configuration for spawning a codex session.
 #[derive(Debug, Clone)]

@@ -117,7 +117,13 @@ mod tests {
     #[test]
     fn next_cycles_through_all_levels_in_order() {
         let mut cur = PermissionLevel::Default;
-        let order: Vec<_> = (0..5).map(|_| { let next = cur.next(); cur = next; next }).collect();
+        let order: Vec<_> = (0..5)
+            .map(|_| {
+                let next = cur.next();
+                cur = next;
+                next
+            })
+            .collect();
         assert_eq!(
             order,
             vec![
