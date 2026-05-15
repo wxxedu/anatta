@@ -114,10 +114,24 @@ pub fn absorb_after_turn(input: AbsorbInput<'_>) -> Result<AbsorbOutcome, Absorb
                 new_last_absorbed: cur_size,
             });
         }
-        return Err(AbsorbError::CentralOversize {
-            actual: actual_central,
-            expected: expected_central_after_prior,
-        });
+        // Resume-after-render case: a prior session populated central
+        // with absorbed claude content, then chat closed and resumed.
+        // On resume, render rebuilt working from central and bumped
+        // both `last_absorbed_bytes` and `render_initial_bytes` to the
+        // rendered working size — but did not truncate central. Central
+        // still holds the prior absorbed content (the same data render
+        // re-projected into working). The new claude bytes beyond
+        // `last_absorbed_bytes` in working can be safely appended on
+        // top. Recognize this state by checking that central is aligned
+        // to `last_absorbed_bytes`; if so, fall through to the normal
+        // append path below.
+        if actual_central != input.last_absorbed_bytes {
+            return Err(AbsorbError::CentralOversize {
+                actual: actual_central,
+                expected: expected_central_after_prior,
+            });
+        }
+        // Fall through to normal append.
     }
 
     // Normal path: read [last_absorbed_bytes .. cur_size) from working,
@@ -319,6 +333,50 @@ mod tests {
         }
         // central still 10 bytes, not 20
         assert_eq!(fs::metadata(&central).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn resume_after_render_keeps_central_aligned() {
+        // Models the chat-resume scenario: a prior session absorbed 50
+        // bytes into central, then render-on-resume rebuilt working to
+        // 50 bytes and bumped both `last_absorbed_bytes` and
+        // `render_initial_bytes` to 50 without truncating central.
+        // The next turn appends 7 bytes to working. Absorb should
+        // recognize this state and append cleanly.
+        let tmp = TempDir::new().unwrap();
+        let working = tmp.path().join("working.jsonl");
+        let central = tmp.path().join("central.jsonl");
+        // 50 bytes of pre-render claude content in central, plus the
+        // rendered prefix in working (also 50 bytes — render
+        // re-projects the same data).
+        let prior = vec![b'A'; 50];
+        write(&central, &prior);
+        // Working now has render prefix + 7 new bytes from one new turn.
+        let mut working_content = prior.clone();
+        working_content.extend_from_slice(b"newturn");
+        write(&working, &working_content);
+
+        let outcome = absorb_after_turn(AbsorbInput {
+            working_jsonl: &working,
+            working_sidecar: &tmp.path().join("ws"),
+            central_events: &central,
+            central_sidecar: &tmp.path().join("cs"),
+            last_absorbed_bytes: 50,
+            render_initial_bytes: 50,
+        })
+        .unwrap();
+
+        match outcome {
+            AbsorbOutcome::Absorbed {
+                appended_bytes,
+                new_last_absorbed,
+            } => {
+                assert_eq!(appended_bytes, 7);
+                assert_eq!(new_last_absorbed, 57);
+            }
+            other => panic!("expected Absorbed, got {other:?}"),
+        }
+        assert_eq!(fs::metadata(&central).unwrap().len(), 57);
     }
 
     #[test]
