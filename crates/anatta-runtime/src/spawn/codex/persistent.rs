@@ -29,7 +29,7 @@ use crate::spawn::{ExitInfo, SpawnError, stderr_buf};
 use super::handshake::{Handshake, handshake};
 use super::launch::CodexLaunch;
 use super::pump::{persistent_reader_loop, push_synthetic_session_started, write_request};
-use super::{APPROVAL_POLICY, FIRST_TURN_REQUEST_ID};
+use super::FIRST_TURN_REQUEST_ID;
 
 pub struct PersistentCodexSession {
     child: Child,
@@ -45,6 +45,10 @@ pub struct PersistentCodexSession {
     stderr: stderr_buf::Handle,
     started_at: Instant,
     events_emitted: Arc<AtomicU64>,
+    /// Per-turn policy derived from the session's current permission
+    /// level. Initialized in open(); mutated in set_permission_level
+    /// (Task 9).
+    current_policy: Mutex<anatta_core::CodexPolicy>,
 }
 
 /// Clonable handle for interrupting the currently-active turn of a
@@ -123,6 +127,7 @@ impl TurnHandle {
 impl PersistentCodexSession {
     pub async fn open(launch: CodexLaunch) -> Result<Self, SpawnError> {
         let started_at = Instant::now();
+        let initial_policy = launch.permission_level.codex_policy();
         let Handshake {
             child,
             stdin,
@@ -136,6 +141,7 @@ impl PersistentCodexSession {
             &launch.cwd,
             launch.api_key.as_deref(),
             launch.resume.as_ref().map(|r| r.as_str()),
+            initial_policy,
         )
         .await?;
 
@@ -171,6 +177,7 @@ impl PersistentCodexSession {
             stderr,
             started_at,
             events_emitted,
+            current_policy: Mutex::new(initial_policy),
         })
     }
 
@@ -228,6 +235,13 @@ impl PersistentCodexSession {
         )
         .await?;
 
+        // Snapshot the current policy before acquiring stdin so we
+        // don't hold both locks across the .await.
+        let approval = {
+            let policy = self.current_policy.lock().await;
+            policy.approval
+        };
+
         // Write turn/start.
         let mut stdin_guard = self.stdin.lock().await;
         let stdin = stdin_guard
@@ -240,7 +254,7 @@ impl PersistentCodexSession {
             TurnStartParams {
                 thread_id: &self.thread_id,
                 input: vec![TurnInput::Text { text: prompt }],
-                approval_policy: APPROVAL_POLICY,
+                approval_policy: approval,
                 cwd: &self.cwd_str,
             },
         )

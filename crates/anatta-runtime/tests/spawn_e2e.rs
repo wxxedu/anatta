@@ -305,6 +305,7 @@ async fn launch_real_codex_emits_session_started_assistant_completion() {
         resume: None,
         binary_path: bin,
         api_key: None,
+        permission_level: anatta_core::PermissionLevel::Default,
     };
 
     let mut session = launch.launch().await.expect("launch");

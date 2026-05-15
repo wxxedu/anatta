@@ -188,5 +188,6 @@ fn build_codex(
         resume: resume.map(CodexThreadId::new),
         binary_path,
         api_key,
+        permission_level: anatta_core::PermissionLevel::Default,
     })
 }

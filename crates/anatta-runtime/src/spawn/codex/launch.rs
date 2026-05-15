@@ -26,7 +26,7 @@ use crate::spawn::{AgentSession, CodexThreadId, Launchable, SpawnError};
 
 use super::handshake::{Handshake, handshake};
 use super::pump::{make_error_event, push_synthetic_session_started, run_pump, write_request};
-use super::{APPROVAL_POLICY, FIRST_TURN_REQUEST_ID};
+use super::FIRST_TURN_REQUEST_ID;
 
 /// Configuration for spawning a codex session.
 #[derive(Debug, Clone)]
@@ -40,12 +40,17 @@ pub struct CodexLaunch {
     /// `Some(key)` → set `OPENAI_API_KEY` on the spawned process.
     /// `None` → codex finds its own auth via `CODEX_HOME/auth.json`.
     pub api_key: Option<String>,
+    /// Initial permission level. The mapping to codex's two per-turn
+    /// axes (approval_policy, sandbox) and the session-level
+    /// `approvals_reviewer` is in `PermissionLevel::codex_policy`.
+    pub permission_level: anatta_core::PermissionLevel,
 }
 
 #[async_trait]
 impl Launchable for CodexLaunch {
     async fn launch(self) -> Result<AgentSession, SpawnError> {
         let started_at = Instant::now();
+        let policy = self.permission_level.codex_policy();
         let Handshake {
             child,
             mut stdin,
@@ -59,6 +64,7 @@ impl Launchable for CodexLaunch {
             &self.cwd,
             self.api_key.as_deref(),
             self.resume.as_ref().map(|r| r.as_str()),
+            policy,
         )
         .await?;
 
@@ -70,7 +76,7 @@ impl Launchable for CodexLaunch {
             TurnStartParams {
                 thread_id: &thread_id,
                 input: vec![TurnInput::Text { text: &self.prompt }],
-                approval_policy: APPROVAL_POLICY,
+                approval_policy: policy.approval,
                 cwd: &cwd_str,
             },
         )

@@ -18,7 +18,6 @@ use crate::spawn::SpawnError;
 use crate::spawn::stderr_buf;
 
 use super::pump::{wait_for_response, write_notification, write_request};
-use super::{APPROVAL_POLICY, SANDBOX_POLICY};
 
 /// JSON-RPC request id for the `initialize` request.
 const INITIALIZE_REQUEST_ID: i64 = 0;
@@ -45,6 +44,7 @@ pub(super) async fn handshake(
     cwd: &Path,
     api_key: Option<&str>,
     resume: Option<&str>,
+    policy: anatta_core::CodexPolicy,
 ) -> Result<Handshake, SpawnError> {
     if !binary_path.exists() {
         return Err(SpawnError::BinaryNotFound(binary_path.to_path_buf()));
@@ -59,6 +59,9 @@ pub(super) async fn handshake(
         cmd.env("OPENAI_API_KEY", key);
     }
     cmd.current_dir(cwd);
+    if policy.reviewer_armed {
+        cmd.arg("-c").arg("approvals_reviewer=auto_review");
+    }
     cmd.arg("app-server");
     cmd.kill_on_drop(true);
     cmd.stdin(std::process::Stdio::piped());
@@ -129,9 +132,9 @@ pub(super) async fn handshake(
                 THREAD_REQUEST_ID,
                 "thread/start",
                 ThreadStartParams {
-                    approval_policy: APPROVAL_POLICY,
+                    approval_policy: policy.approval,
                     cwd: &cwd_str,
-                    sandbox: SANDBOX_POLICY,
+                    sandbox: policy.sandbox,
                 },
             )
             .await?;
@@ -151,9 +154,9 @@ pub(super) async fn handshake(
                 "thread/resume",
                 ThreadResumeParams {
                     thread_id: id,
-                    approval_policy: APPROVAL_POLICY,
+                    approval_policy: policy.approval,
                     cwd: &cwd_str,
-                    sandbox: SANDBOX_POLICY,
+                    sandbox: policy.sandbox,
                 },
             )
             .await?;
