@@ -25,6 +25,7 @@ use crate::claude::HistoryProjector;
 use crate::claude::history::ClaudeEvent;
 use crate::conversation::paths::{encode_cwd, working_jsonl_path};
 use crate::profile::ClaudeProfile;
+use crate::spawn::claude::ensure_skip_dangerous_mode_permission_prompt;
 use crate::spawn::stderr_buf;
 use crate::spawn::{ClaudeSessionId, ExitInfo, SpawnError};
 
@@ -34,9 +35,29 @@ const PTY_COLS: u16 = 200;
 /// the PTY input handler has time to be ready for bracketed-paste keystrokes
 /// from the first `send_turn`.
 const STARTUP_SLEEP: Duration = Duration::from_millis(500);
-const SESSION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for claude to write its first session-JSONL file
+/// after spawn. Healthy launches finish in ~1s; the budget allows for
+/// slow filesystems but stays short enough that a hung claude (missing
+/// disclaimer marker, broken auth, etc.) fails fast and the REPL can
+/// surface the error. Set `ANATTA_DEBUG_CLAUDE_STARTUP=1` to diagnose.
+const SESSION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const SESSION_DISCOVERY_INTERVAL: Duration = Duration::from_millis(200);
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
+
+/// Set `ANATTA_DEBUG_CLAUDE_STARTUP=1` to dump per-step diagnostics
+/// (argv, PTY drain bytes, JSONL discovery polls) to stderr. Off by
+/// default to avoid noise in normal use.
+fn debug_startup_enabled() -> bool {
+    std::env::var_os("ANATTA_DEBUG_CLAUDE_STARTUP").is_some_and(|v| v != "0" && !v.is_empty())
+}
+
+macro_rules! debug_startup {
+    ($($arg:tt)*) => {
+        if $crate::spawn::claude_interactive::debug_startup_enabled() {
+            eprintln!("[anatta:claude-startup] {}", format_args!($($arg)*));
+        }
+    };
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Prompt encoding
@@ -235,6 +256,34 @@ pub struct ClaudeInteractiveSession {
     /// number of `\x1b[Z` (Shift+Tab) writes needed to reach a new
     /// target without scraping the TUI's status bar.
     current_level: std::sync::Mutex<anatta_core::PermissionLevel>,
+    /// Drop-fires SIGKILL on the spawned claude child if the session is
+    /// dropped without `close()` (e.g. mid-await abort, panic). `close()`
+    /// disarms this so it does not double-kill an already-handled child.
+    child_guard: ChildKillerGuard,
+}
+
+/// Holds a `ChildKiller` clone of the spawned claude child so we can
+/// guarantee the process is reaped even when the surrounding
+/// `ClaudeInteractiveSession` future is dropped before `close()` runs.
+/// Armed by default at construction; the normal close path calls
+/// [`Self::disarm`] before consuming the child explicitly.
+struct ChildKillerGuard {
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    armed: bool,
+}
+
+impl ChildKillerGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildKillerGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.killer.kill();
+        }
+    }
 }
 
 /// Cloneable handle for interrupting the active turn from outside — see
@@ -275,6 +324,12 @@ impl ClaudeInteractiveSession {
         }
 
         ensure_onboarding_complete(&launch.profile.path).await?;
+        ensure_skip_dangerous_mode_permission_prompt(&launch.profile.path).await?;
+        debug_startup!(
+            "seeded claude startup markers at {} and {}",
+            launch.profile.path.join(".claude.json").display(),
+            launch.profile.path.join("settings.json").display()
+        );
 
         let cwd_str = launch
             .cwd
@@ -282,7 +337,13 @@ impl ClaudeInteractiveSession {
             .ok_or_else(|| SpawnError::Io(std::io::Error::other("cwd is not UTF-8")))?;
         let project_jsonl_dir = project_jsonl_dir(&launch.profile.path, cwd_str);
         let pre_spawn_jsonls = if launch.resume.is_none() {
-            Some(snapshot_jsonl_stems(&project_jsonl_dir).await?)
+            let snapshot = snapshot_jsonl_stems(&project_jsonl_dir).await?;
+            debug_startup!(
+                "pre-spawn JSONL snapshot at {}: {} file(s)",
+                project_jsonl_dir.display(),
+                snapshot.len()
+            );
+            Some(snapshot)
         } else {
             None
         };
@@ -325,11 +386,33 @@ impl ClaudeInteractiveSession {
             cmd.arg(resume.as_str());
         }
 
+        debug_startup!(
+            "spawning {} --permission-mode {}{}{}{}",
+            launch.binary_path.display(),
+            launch.permission_level.claude_arg(),
+            if launch.bare { " --bare" } else { "" },
+            launch
+                .model
+                .as_deref()
+                .map(|m| format!(" --model {m}"))
+                .unwrap_or_default(),
+            launch
+                .resume
+                .as_ref()
+                .map(|r| format!(" --resume {}", r.as_str()))
+                .unwrap_or_default(),
+        );
+
         let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| SpawnError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
         drop(pair.slave);
+        debug_startup!("claude process spawned, pid={:?}", child.process_id());
+        let child_guard = ChildKillerGuard {
+            killer: child.clone_killer(),
+            armed: true,
+        };
 
         let mut reader = pair
             .master
@@ -343,10 +426,47 @@ impl ClaudeInteractiveSession {
         // Drain thread: must read continuously or the kernel PTY buffer
         // fills, claude blocks on its next write, and the JSONL stops
         // being appended.
+        //
+        // In debug mode, capture the first 32 KiB so we can see startup
+        // banners / dialogs that might be blocking the session JSONL.
+        let debug = debug_startup_enabled();
         std::thread::Builder::new()
             .name("claude-pty-drain".into())
             .spawn(move || {
-                let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                if debug {
+                    use std::io::Read;
+                    let mut head = Vec::with_capacity(32 * 1024);
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if head.len() < 32 * 1024 {
+                                    let take = (32 * 1024 - head.len()).min(n);
+                                    head.extend_from_slice(&buf[..take]);
+                                    if head.len() >= 32 * 1024 {
+                                        let printable = String::from_utf8_lossy(&head);
+                                        eprintln!(
+                                            "[anatta:claude-startup] PTY first 32K (escaped):\n{:?}",
+                                            printable.as_ref()
+                                        );
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    if !head.is_empty() && head.len() < 32 * 1024 {
+                        let printable = String::from_utf8_lossy(&head);
+                        eprintln!(
+                            "[anatta:claude-startup] PTY drained {} bytes (escaped):\n{:?}",
+                            head.len(),
+                            printable.as_ref()
+                        );
+                    }
+                } else {
+                    let _ = std::io::copy(&mut reader, &mut std::io::sink());
+                }
             })
             .map_err(SpawnError::Io)?;
 
@@ -419,6 +539,7 @@ impl ClaudeInteractiveSession {
             started_at: Instant::now(),
             events_emitted,
             current_level: std::sync::Mutex::new(launch.permission_level),
+            child_guard,
         })
     }
 
@@ -435,6 +556,27 @@ impl ClaudeInteractiveSession {
             pty_tx: self.pty_tx.clone(),
             active_turn: self.active_turn.clone(),
         }
+    }
+
+    /// Abort an in-flight turn whose `send_turn` future never returned
+    /// a `TurnEvents` handle to the caller (e.g. cancelled mid-discovery
+    /// by the REPL's Ctrl-C wrapper). Sends `\x03` to claude's PTY to
+    /// interrupt any in-progress turn-processing and clears the
+    /// `active_turn` flag so the next `send_turn` is accepted.
+    ///
+    /// Safe to call when no turn is active — it becomes a no-op.
+    pub async fn abort_pending_turn(&self) -> Result<(), SpawnError> {
+        {
+            let mut guard = self.active_turn.lock().await;
+            if guard.is_none() {
+                return Ok(());
+            }
+            *guard = None;
+        }
+        // Best-effort SIGINT to claude's TUI; ignore send errors (the
+        // writer task may already be gone if the child died).
+        let _ = self.pty_tx.send(PtyCommand::Write(vec![0x03])).await;
+        Ok(())
     }
 
     /// Cycle claude's TUI permission mode by writing `\x1b[Z` (Shift+Tab)
@@ -599,6 +741,11 @@ async fn persistent_tail_loop(
 /// - `autoPermissionsNotificationCount` + `hasResetAutoModeOptInForDefaultOffer`
 ///   — skips the "Enable auto mode?" opt-in dialog that fires the
 ///   first time `--permission-mode auto` is used in this profile.
+/// - `bypassPermissionsModeAccepted` — legacy bypass disclaimer marker.
+///   Current claude releases use `settings.json` key
+///   `skipDangerousModePermissionPrompt`; that is seeded separately by
+///   [`ensure_skip_dangerous_mode_permission_prompt`]. Without that key,
+///   claude blocks on the dialog and never creates the session JSONL we tail.
 ///
 /// Each marker is added independently if missing — the function runs
 /// every `open()` and is safe to re-run on profiles that already have
@@ -655,6 +802,13 @@ async fn ensure_onboarding_complete(profile_dir: &Path) -> Result<(), SpawnError
         );
         changed = true;
     }
+    if !obj.contains_key("bypassPermissionsModeAccepted") {
+        obj.insert(
+            "bypassPermissionsModeAccepted".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        changed = true;
+    }
 
     if !changed {
         return Ok(());
@@ -700,21 +854,39 @@ async fn discover_new_session_id(
     pre_spawn_jsonls: &HashSet<String>,
 ) -> Result<ClaudeSessionId, SpawnError> {
     let started = Instant::now();
+    let mut last_seen_total: Option<usize> = None;
     loop {
         let current = snapshot_jsonl_stems(dir).await?;
+        if debug_startup_enabled() && last_seen_total != Some(current.len()) {
+            debug_startup!(
+                "discovery poll at {:.1}s: dir has {} jsonl(s), {} new",
+                started.elapsed().as_secs_f32(),
+                current.len(),
+                current.difference(pre_spawn_jsonls).count(),
+            );
+            last_seen_total = Some(current.len());
+        }
         let mut new_stems: Vec<String> = current
             .difference(pre_spawn_jsonls)
             .map(ToOwned::to_owned)
             .collect();
         if !new_stems.is_empty() {
             new_stems.sort();
-            return Ok(ClaudeSessionId::new(new_stems.remove(0)));
+            let picked = new_stems.remove(0);
+            debug_startup!(
+                "discovered new session JSONL stem: {} after {:.1}s",
+                picked,
+                started.elapsed().as_secs_f32()
+            );
+            return Ok(ClaudeSessionId::new(picked));
         }
         if started.elapsed() >= SESSION_DISCOVERY_TIMEOUT {
             return Err(SpawnError::Io(std::io::Error::new(
                 ErrorKind::TimedOut,
                 format!(
-                    "claude did not create a new session JSONL in {} within {:?}",
+                    "claude did not create a new session JSONL in {} within {:?} \
+                     (rerun with `ANATTA_DEBUG_CLAUDE_STARTUP=1` to see argv, PTY \
+                     output, and discovery polls)",
                     dir.display(),
                     SESSION_DISCOVERY_TIMEOUT
                 ),
@@ -782,7 +954,11 @@ impl ClaudeInteractiveSession {
     /// assistant turn into the session JSONL. These pollute the on-disk
     /// record but are filtered out by `HistoryProjector` before reaching
     /// any rendered surface (CLI output, central → render pipeline).
-    pub async fn close(self) -> Result<ExitInfo, SpawnError> {
+    pub async fn close(mut self) -> Result<ExitInfo, SpawnError> {
+        // `close` reaps the child explicitly below — disarm the
+        // drop-guard so it does not double-kill (a no-op if the wait
+        // races, but we avoid the redundant syscall and confusing logs).
+        self.child_guard.disarm();
         let started_at = self.started_at;
         let stderr = self.stderr;
         let events_emitted = self.events_emitted;
