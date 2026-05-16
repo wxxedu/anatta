@@ -126,6 +126,24 @@ impl Session {
         }
     }
 
+    /// Abort a turn whose `send_turn` future was cancelled before it
+    /// returned a `TurnEvents`. Resets the session's in-flight state so
+    /// the next `send_turn` is accepted.
+    ///
+    /// - Per-turn claude (`--print`): nothing to do — the spawn future
+    ///   owns all state; dropping it is sufficient.
+    /// - Interactive claude (PTY): sends `\x03` to claude's TUI and
+    ///   clears the `active_turn` flag.
+    /// - Codex: dropping the cancelled future is sufficient; codex
+    ///   `turn/interrupt` is only needed after `send_turn` succeeded.
+    pub async fn abort_pending_turn(&self) -> Result<(), SpawnError> {
+        match self {
+            Session::Claude(_) => Ok(()),
+            Session::ClaudeInteractive(c) => c.abort_pending_turn().await,
+            Session::Codex(_) => Ok(()),
+        }
+    }
+
     /// Claude session UUID or codex thread UUID. For per-turn claude and
     /// fresh interactive claude this is `None` until the first turn has
     /// produced or discovered the backend session id.

@@ -162,7 +162,10 @@ async fn run_chat(
     }
 
     let launch = launch::build_launch(&profile, cwd.clone(), conv.backend_session_id.clone(), cfg)?;
-    let mut session = Session::open(launch).await?;
+    let mut session = match cancellable(Session::open(launch), "session open").await {
+        CancellableOutcome::Done(r) => r?,
+        CancellableOutcome::Cancelled => return Err(ChatError::InputClosed),
+    };
 
     // Persist the engine session id on first turn (claude needs the
     // system/init event to capture it; codex gets it from thread/start).
@@ -322,9 +325,19 @@ async fn run_chat(
                                 continue;
                             }
                         };
-                        if let Err(e) = session.swap(new_launch).await {
-                            eprintln!("✗ swap failed: {e}");
-                            continue;
+                        match cancellable(session.swap(new_launch), "profile swap").await {
+                            CancellableOutcome::Done(Ok(())) => {}
+                            CancellableOutcome::Done(Err(e)) => {
+                                eprintln!("✗ swap failed: {e}");
+                                continue;
+                            }
+                            CancellableOutcome::Cancelled => {
+                                // Old session is still alive; new launch
+                                // future is dropped. Note: any partially-
+                                // spawned child of the new session leaks
+                                // until that crate-level cleanup lands.
+                                continue;
+                            }
                         }
                         if let Err(e) = cfg
                             .store
@@ -367,9 +380,19 @@ async fn run_chat(
                 }
             }
             ReadOutcome::Line(prompt) => {
-                let turn = match session.send_turn(&prompt).await {
-                    Ok(t) => t,
-                    Err(e) => break Err(e.into()),
+                let turn = match cancellable(session.send_turn(&prompt), "send_turn").await {
+                    CancellableOutcome::Done(Ok(t)) => t,
+                    CancellableOutcome::Done(Err(e)) => break Err(e.into()),
+                    CancellableOutcome::Cancelled => {
+                        // The future was cancelled before send_turn
+                        // returned. The session's in-flight state may
+                        // still be set; clear it so the next prompt
+                        // is accepted.
+                        if let Err(e) = session.abort_pending_turn().await {
+                            eprintln!("✗ abort_pending_turn: {e}");
+                        }
+                        continue;
+                    }
                 };
                 if let Err(e) = drain_turn(turn, renderer).await {
                     break Err(e);
@@ -458,6 +481,38 @@ async fn drain_turn(mut turn: TurnEvents, renderer: &mut LineRenderer) -> Result
     let _ = turn.finalize().await;
     renderer.on_turn_end();
     Ok(())
+}
+
+/// Outcome of [`cancellable`]: the work either completed (with its
+/// `Result`) or was aborted by a Ctrl-C at the terminal.
+enum CancellableOutcome<T> {
+    Done(T),
+    Cancelled,
+}
+
+/// Race a long-running session future against Ctrl-C so the REPL stays
+/// responsive even when `Session::open`, `Session::swap`, or the
+/// blocking part of `send_turn` is awaiting (e.g. JSONL discovery).
+///
+/// Pattern mirrors [`drain_turn`]'s in-turn cancellation but applies to
+/// futures that run BEFORE a `TurnEvents` exists. On cancel the future
+/// is dropped — callers MUST handle the resulting leaked-resource risk
+/// (e.g. a partially-spawned child process). Today, `send_turn` is the
+/// only call site that needs explicit cleanup, via
+/// `Session::abort_pending_turn`.
+async fn cancellable<F, T>(work: F, label: &str) -> CancellableOutcome<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(work);
+    tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("^C — {label} aborted");
+            CancellableOutcome::Cancelled
+        }
+        r = &mut work => CancellableOutcome::Done(r),
+    }
 }
 
 fn print_banner(conv: &ConversationRecord, profile: &ProfileRecord, resumed: bool) {

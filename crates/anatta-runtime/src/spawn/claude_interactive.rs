@@ -35,7 +35,12 @@ const PTY_COLS: u16 = 200;
 /// the PTY input handler has time to be ready for bracketed-paste keystrokes
 /// from the first `send_turn`.
 const STARTUP_SLEEP: Duration = Duration::from_millis(500);
-const SESSION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long to wait for claude to write its first session-JSONL file
+/// after spawn. Healthy launches finish in ~1s; the budget allows for
+/// slow filesystems but stays short enough that a hung claude (missing
+/// disclaimer marker, broken auth, etc.) fails fast and the REPL can
+/// surface the error. Set `ANATTA_DEBUG_CLAUDE_STARTUP=1` to diagnose.
+const SESSION_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const SESSION_DISCOVERY_INTERVAL: Duration = Duration::from_millis(200);
 const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
@@ -251,6 +256,34 @@ pub struct ClaudeInteractiveSession {
     /// number of `\x1b[Z` (Shift+Tab) writes needed to reach a new
     /// target without scraping the TUI's status bar.
     current_level: std::sync::Mutex<anatta_core::PermissionLevel>,
+    /// Drop-fires SIGKILL on the spawned claude child if the session is
+    /// dropped without `close()` (e.g. mid-await abort, panic). `close()`
+    /// disarms this so it does not double-kill an already-handled child.
+    child_guard: ChildKillerGuard,
+}
+
+/// Holds a `ChildKiller` clone of the spawned claude child so we can
+/// guarantee the process is reaped even when the surrounding
+/// `ClaudeInteractiveSession` future is dropped before `close()` runs.
+/// Armed by default at construction; the normal close path calls
+/// [`Self::disarm`] before consuming the child explicitly.
+struct ChildKillerGuard {
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    armed: bool,
+}
+
+impl ChildKillerGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ChildKillerGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.killer.kill();
+        }
+    }
 }
 
 /// Cloneable handle for interrupting the active turn from outside — see
@@ -376,6 +409,10 @@ impl ClaudeInteractiveSession {
             .map_err(|e| SpawnError::Io(std::io::Error::other(format!("spawn: {e}"))))?;
         drop(pair.slave);
         debug_startup!("claude process spawned, pid={:?}", child.process_id());
+        let child_guard = ChildKillerGuard {
+            killer: child.clone_killer(),
+            armed: true,
+        };
 
         let mut reader = pair
             .master
@@ -502,6 +539,7 @@ impl ClaudeInteractiveSession {
             started_at: Instant::now(),
             events_emitted,
             current_level: std::sync::Mutex::new(launch.permission_level),
+            child_guard,
         })
     }
 
@@ -518,6 +556,27 @@ impl ClaudeInteractiveSession {
             pty_tx: self.pty_tx.clone(),
             active_turn: self.active_turn.clone(),
         }
+    }
+
+    /// Abort an in-flight turn whose `send_turn` future never returned
+    /// a `TurnEvents` handle to the caller (e.g. cancelled mid-discovery
+    /// by the REPL's Ctrl-C wrapper). Sends `\x03` to claude's PTY to
+    /// interrupt any in-progress turn-processing and clears the
+    /// `active_turn` flag so the next `send_turn` is accepted.
+    ///
+    /// Safe to call when no turn is active — it becomes a no-op.
+    pub async fn abort_pending_turn(&self) -> Result<(), SpawnError> {
+        {
+            let mut guard = self.active_turn.lock().await;
+            if guard.is_none() {
+                return Ok(());
+            }
+            *guard = None;
+        }
+        // Best-effort SIGINT to claude's TUI; ignore send errors (the
+        // writer task may already be gone if the child died).
+        let _ = self.pty_tx.send(PtyCommand::Write(vec![0x03])).await;
+        Ok(())
     }
 
     /// Cycle claude's TUI permission mode by writing `\x1b[Z` (Shift+Tab)
@@ -825,7 +884,9 @@ async fn discover_new_session_id(
             return Err(SpawnError::Io(std::io::Error::new(
                 ErrorKind::TimedOut,
                 format!(
-                    "claude did not create a new session JSONL in {} within {:?}",
+                    "claude did not create a new session JSONL in {} within {:?} \
+                     (rerun with `ANATTA_DEBUG_CLAUDE_STARTUP=1` to see argv, PTY \
+                     output, and discovery polls)",
                     dir.display(),
                     SESSION_DISCOVERY_TIMEOUT
                 ),
@@ -893,7 +954,11 @@ impl ClaudeInteractiveSession {
     /// assistant turn into the session JSONL. These pollute the on-disk
     /// record but are filtered out by `HistoryProjector` before reaching
     /// any rendered surface (CLI output, central → render pipeline).
-    pub async fn close(self) -> Result<ExitInfo, SpawnError> {
+    pub async fn close(mut self) -> Result<ExitInfo, SpawnError> {
+        // `close` reaps the child explicitly below — disarm the
+        // drop-guard so it does not double-kill (a no-op if the wait
+        // races, but we avoid the redundant syscall and confusing logs).
+        self.child_guard.disarm();
         let started_at = self.started_at;
         let stderr = self.stderr;
         let events_emitted = self.events_emitted;
